@@ -61,9 +61,17 @@ class PureKotlinTest {
         assertEquals(33, u32(latOff)); assertEquals(1, u32(latOff + 4))
     }
 
+    /** JPEG con estructura completa (DQT, SOS con datos y EOI), como los de una cámara. */
+    private fun structuredJpeg(): ByteArray {
+        val app0 = byteArrayOf(0xFF.toByte(), 0xE0.toByte(), 0, 16) + "JFIF\u0000".toByteArray(Charsets.ISO_8859_1) + ByteArray(9)
+        val dqt = byteArrayOf(0xFF.toByte(), 0xDB.toByte(), 0, 4, 1, 2)
+        val sos = byteArrayOf(0xFF.toByte(), 0xDA.toByte(), 0, 2) + ByteArray(100) { (it % 200).toByte() }
+        return byteArrayOf(0xFF.toByte(), 0xD8.toByte()) + app0 + dqt + sos + byteArrayOf(0xFF.toByte(), 0xD9.toByte())
+    }
+
     @Test
     fun stripGpsKeepsSizeAndRemovesLocation() {
-        val withGps = ExifWriter.insert(fakeJpeg(), ExifWriter.Info(orientation = 6, make = "Test",
+        val withGps = ExifWriter.insert(structuredJpeg(), ExifWriter.Info(orientation = 6, make = "Test",
             gps = ExifWriter.Gps(40.4168, -3.7038, 650.0)))
         val copy = withGps.copyOf()
         assertEquals(ExifWriter.GpsStrip.STRIPPED, ExifWriter.stripGps(copy))
@@ -74,7 +82,7 @@ class PureKotlinTest {
         // Ya no hay nada que quitar.
         assertEquals(ExifWriter.GpsStrip.NONE, ExifWriter.stripGps(copy))
         // Sin GPS de partida: no cambia nada.
-        val plain = ExifWriter.insert(fakeJpeg(), ExifWriter.Info(orientation = 1))
+        val plain = ExifWriter.insert(structuredJpeg(), ExifWriter.Info(orientation = 1))
         val p2 = plain.copyOf()
         assertEquals(ExifWriter.GpsStrip.NONE, ExifWriter.stripGps(p2))
         assertTrue(p2.contentEquals(plain))
@@ -82,13 +90,13 @@ class PureKotlinTest {
 
     @Test
     fun stripGpsFailsSafely() {
-        val withGps = ExifWriter.insert(fakeJpeg(), ExifWriter.Info(gps = ExifWriter.Gps(1.0, 2.0)))
+        val withGps = ExifWriter.insert(structuredJpeg(), ExifWriter.Info(gps = ExifWriter.Gps(1.0, 2.0)))
         // Bytes de relleno 0xFF antes del APP1: se siguen encontrando y borrando.
         val padded = withGps.copyOfRange(0, 2) + byteArrayOf(0xFF.toByte(), 0xFF.toByte()) + withGps.copyOfRange(3, withGps.size)
         assertEquals(ExifWriter.GpsStrip.STRIPPED, ExifWriter.stripGps(padded))
         // Puntero GPS fuera del segmento: no se puede comprobar -> FAILED (no compartir).
         val broken = withGps.copyOf()
-        val tiff = 10
+        val tiff = 12   // SOI (2) + FF E1 + longitud (4) + "Exif\0\0" (6)
         val ifd0 = tiff + 8
         val n = ((broken[ifd0].toInt() and 0xFF) shl 8) or (broken[ifd0 + 1].toInt() and 0xFF)
         for (k in 0 until n) {

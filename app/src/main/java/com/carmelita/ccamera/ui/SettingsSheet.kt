@@ -93,6 +93,38 @@ fun SettingsSheet(state: CameraUiState, vm: CameraViewModel) {
             )
             Toggle("Lector de QR automático", state.qrEnabled, vm::toggleQr)
 
+            Section("Estabilización")
+            Text(
+                "Este teléfono: " +
+                    (if (state.hasOis) "estabilizador óptico ✓" else "sin estabilizador óptico") + " · " +
+                    (if (state.hasHalEis) "estabilización de vídeo propia ✓" else "sin estabilización de vídeo propia") +
+                    (if (!state.hasGyro) " · sin giroscopio (no hay estabilizador digital de vídeo)" else ""),
+                color = Color.White, fontSize = 14.sp, modifier = Modifier.padding(vertical = 4.dp),
+            )
+            Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Stabilization.entries.forEach { v ->
+                    val sel = v == state.stabilization
+                    Text(
+                        v.label, color = if (sel) Color.Black else Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clip(RoundedCornerShape(50)).background(if (sel) Yellow else Color(0x33FFFFFF))
+                            .clickable { vm.setStabilization(v) }.padding(horizontal = 14.dp, vertical = 7.dp),
+                    )
+                }
+            }
+            Text(
+                when (state.stabilization) {
+                    Stabilization.AUTO ->
+                        "Usa la del teléfono si la tiene. Si no: en fotos elige el fotograma más nítido de la ráfaga, " +
+                            "y en vídeo C Camera compensa el temblor con el giroscopio (recorta un poco la imagen)."
+                    Stabilization.CCAMERA ->
+                        "Siempre la de C Camera: fotograma más nítido en fotos y compensación con giroscopio en vídeo " +
+                            "(en lugar de la electrónica del teléfono). El estabilizador óptico, si lo hay, sigue activo."
+                    Stabilization.OFF ->
+                        "Sin estabilización digital. El estabilizador óptico, si lo hay, sigue activo (es físico)."
+                },
+                color = Color(0xFF8E8E93), fontSize = 13.sp,
+            )
+
             Section("Vídeo")
             if (state.can4k) Toggle("Vídeo en 4K", state.video4k, vm::toggle4k)
             if (state.can60) Toggle("Vídeo a 60 fps", state.video60, vm::toggle60)

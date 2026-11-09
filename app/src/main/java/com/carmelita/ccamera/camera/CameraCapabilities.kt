@@ -108,6 +108,22 @@ class CameraCapabilities private constructor(
     val awbModes: IntArray = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: IntArray(0)
     val aeLockAvailable: Boolean = chars.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE) == true
 
+    // ---- Estabilización ----
+    /** ¿Los timestamps de los fotogramas usan el mismo reloj que los sensores (giroscopio)? */
+    val realtimeTimestamps: Boolean = chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
+        CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+    val hasGyro: Boolean = gyroPresent
+
+    /** Focal en píxeles para una imagen de [width] px de ancho (el ancho cubre todo el sensor). */
+    fun focalPx(width: Int): Float {
+        val f = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.minOrNull() ?: 4.3f
+        val sw = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.width ?: 6.4f
+        return f / sw * width
+    }
+
+    /** Estabilización de vídeo que ofrece el propio teléfono (electrónica, en el ISP). */
+    val halVideoStabilization: Boolean get() = videoStabilization || previewStabilization
+
     // ---- Zoom y lentes ----
     val logicalMultiCamera = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)
     val usesZoomRatio: Boolean = Build.VERSION.SDK_INT >= 30 && chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) != null
@@ -215,7 +231,8 @@ class CameraCapabilities private constructor(
             "Autoenfoque" to yes(hasAutofocus),
             "Flash" to yes(hasFlash),
             "Estabilización óptica (OIS)" to yes(ois),
-            "Estabilización de vídeo" to yes(videoStabilization),
+            "Estabilización electrónica del teléfono" to yes(halVideoStabilization),
+            "Giroscopio (estabilizador de C Camera)" to yes(hasGyro),
             "Vídeo 4K" to yes(video4k),
             "Vídeo 60 fps" to yes(supportsFps(videoSize(false), 60)),
             "HEVC" to yes(hevc),
@@ -237,6 +254,9 @@ class CameraCapabilities private constructor(
             val r = (z * 10).roundToInt() / 10f
             return if (r < 1f) ".${(r * 10).roundToInt()}" else if (r == r.toInt().toFloat()) r.toInt().toString() else r.toString()
         }
+
+        /** Lo fija CameraController al crear las capacidades (hace falta el Context). */
+        @Volatile var gyroPresent = false
 
         fun detect(manager: CameraManager, lens: Lens): CameraCapabilities {
             val facing = if (lens == Lens.BACK) CameraMetadata.LENS_FACING_BACK else CameraMetadata.LENS_FACING_FRONT

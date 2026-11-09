@@ -338,7 +338,8 @@ private fun TopBar(
                 color = Yellow, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             state.mode == CaptureMode.TIMELAPSE -> Text("15×", color = Yellow, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             state.mode == CaptureMode.PANO -> Text("PANORÁMICA", color = Color(0xFF8E8E93), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-            video -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            video -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (state.digitalStabActive) Text("EST.", color = Yellow, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 if (state.can4k) SmallToggle(if (state.video4k) "4K" else "HD", state.video4k, vm::toggle4k)
                 if (state.can60) SmallToggle(if (state.video60) "60" else "30", state.video60, vm::toggle60)
             }

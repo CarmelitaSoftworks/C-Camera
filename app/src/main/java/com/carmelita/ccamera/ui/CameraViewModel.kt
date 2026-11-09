@@ -22,6 +22,7 @@ import com.carmelita.ccamera.camera.CapturedFrame
 import com.carmelita.ccamera.camera.FlashMode
 import com.carmelita.ccamera.camera.Lens
 import com.carmelita.ccamera.camera.ProSettings
+import com.carmelita.ccamera.camera.ReferencePicker
 import com.carmelita.ccamera.camera.VideoRecorder
 import com.carmelita.ccamera.camera.ZoomStop
 import com.carmelita.ccamera.processing.DevelopParams
@@ -70,6 +71,16 @@ enum class CaptureMode(val label: String, val isVideo: Boolean = false) {
     PANO("PANO"),
     NIGHT("NOCHE"),
     PRO("PRO"),
+}
+
+/** Estabilización digital de C Camera. */
+enum class Stabilization(val label: String) {
+    /** Sólo si el teléfono no tiene la suya (óptica para fotos, electrónica para vídeo). */
+    AUTO("Automática"),
+    /** Siempre la de C Camera (además del OIS, si lo hay). */
+    CCAMERA("C Camera"),
+    /** Sin estabilización digital (el OIS, si lo hay, sigue funcionando: es físico). */
+    OFF("Desactivada"),
 }
 
 /** Opciones del modo Pro que la interfaz puede ofrecer en este teléfono. */
@@ -156,6 +167,13 @@ data class CameraUiState(
     /** null = aún no se sabe; true = hay una persona en la vista previa. */
     val portraitSubject: Boolean? = null,
     val shareWithoutLocation: Boolean = true,
+    // Estabilización
+    val stabilization: Stabilization = Stabilization.AUTO,
+    val hasOis: Boolean = false,
+    val hasHalEis: Boolean = false,
+    val hasGyro: Boolean = false,
+    /** La vista previa / grabación de vídeo actual usa el estabilizador de C Camera. */
+    val digitalStabActive: Boolean = false,
 ) {
     val ev: Float get() = evIndex * evStep
 }
@@ -189,6 +207,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             portraitLight = runCatching { PortraitLighting.valueOf(prefs.getString("portraitLight", null) ?: "") }
                 .getOrDefault(PortraitLighting.NATURAL),
             shareWithoutLocation = prefs.getBoolean("shareNoLocation", true),
+            stabilization = runCatching { Stabilization.valueOf(prefs.getString("stabilization", null) ?: "") }
+                .getOrDefault(Stabilization.AUTO),
         )
     )
     val state: StateFlow<CameraUiState> = _state
@@ -259,9 +279,13 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun configureLocked(t: SurfaceTexture) {
         val s = _state.value
         val caps = controller.caps
+        applyVideoStabilization(s)
         if (s.mode.isVideo) {
             controller.startVideoPreview(t)
-            _state.update { it.copy(liveActive = false, rawActive = false, zslActive = false, sessionSummary = "Vídeo") }
+            _state.update {
+                it.copy(liveActive = false, rawActive = false, zslActive = false, digitalStabActive = controller.digitalStabilizerActive,
+                    sessionSummary = "Vídeo" + if (controller.digitalStabilizerActive) " · estabilizador C Camera" else "")
+            }
         } else {
             val info = controller.startPhotoSession(t, wantLive = s.livePhoto, maxPixels = maxPixels)
             _state.update {
@@ -287,8 +311,33 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 aeAfLocked = false, hasMacro = caps.hasMacroAf,
                 slowMoLabel = caps.slowMotion?.let { (sz, fps) -> "${if (sz.height >= 1080) "1080p" else "${sz.height}p"} $fps" },
                 proCaps = proCaps(caps),
+                hasOis = caps.ois, hasHalEis = caps.halVideoStabilization, hasGyro = caps.hasGyro,
             )
         }
+    }
+
+    /** Qué estabilización de vídeo usa la próxima sesión (llamar con camMutex tomado y la cámara abierta). */
+    private fun applyVideoStabilization(s: CameraUiState) {
+        val caps = controller.caps
+        controller.digitalVideoStabilization = s.mode != CaptureMode.SLOWMO && caps.hasGyro && when (s.stabilization) {
+            Stabilization.AUTO -> !caps.halVideoStabilization
+            Stabilization.CCAMERA -> true
+            Stabilization.OFF -> false
+        }
+        controller.halVideoStabilization = s.stabilization != Stabilization.OFF
+    }
+
+    /** ¿Elegir el fotograma más nítido como referencia? (sin OIS en Automática, o siempre con C Camera). */
+    private fun photoStabilization(s: CameraUiState): Boolean = when (s.stabilization) {
+        Stabilization.AUTO -> !s.hasOis
+        Stabilization.CCAMERA -> true
+        Stabilization.OFF -> false
+    }
+
+    fun setStabilization(v: Stabilization) {
+        prefs.edit().putString("stabilization", v.name).apply()
+        _state.update { it.copy(stabilization = v) }
+        if (_state.value.mode.isVideo && !_state.value.recording) reconfigure()
     }
 
     /** Pro y macro según el modo (llamar con camMutex tomado). */
@@ -614,13 +663,15 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 job = j
                 val flashNeeded = caps.hasFlash && s.mode != CaptureMode.PRO &&
                     (s.flash == FlashMode.ON || (s.flash == FlashMode.AUTO && controller.flashRequired()))
-                fun keepRaw(f: CapturedFrame, i: Int) { if (i == 0 && f is CapturedFrame.Raw) firstRaw = f }
+                // Estabilización digital de fotos: el fotograma más nítido de los primeros es la referencia.
+                val picker = ReferencePicker(enabled = photoStabilization(s)) { f, r -> j.add(f, r) }
 
                 camMutex.withLock {
                     when {
                         flashNeeded -> {
                             kind = "Flash"
-                            controller.captureWithFlash { f, r, _ -> keepRaw(f, 0); j.add(f, r); refResult = r; progress(1f) }
+                            controller.captureWithFlash { f, r, _ -> picker.offer(f, r); progress(1f) }
+                            picker.finish()
                         }
                         s.mode == CaptureMode.NIGHT -> {
                             kind = "Noche"
@@ -628,10 +679,9 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                             try {
                                 val (reqs, t) = controller.nightRequests(NIGHT_FRAMES)
                                 controller.capture(reqs, 3_000 + (t ?: 0L) / 1_000_000L * 3) { f, r, i ->
-                                    if (i == 0) refResult = r
-                                    keepRaw(f, i)
-                                    j.add(f, r); progress((i + 1f) / NIGHT_FRAMES)
+                                    picker.offer(f, r); progress((i + 1f) / NIGHT_FRAMES)
                                 }
+                                picker.finish()
                             } finally { controller.frames.setPaused(false) }
                         }
                         else -> {
@@ -646,18 +696,14 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                                     liveClip = async(Dispatchers.IO) { runCatching { lr.export(shutterUs, file, rotation) }.getOrNull() }
                                 }
                                 zsl.forEachIndexed { i, f ->
-                                    val r = controller.frames.result(f.timestamp)
-                                    if (i == 0) refResult = r
-                                    keepRaw(f, i)
-                                    j.add(f, r); progress((i + 1f) / (zsl.size + 1))
+                                    picker.offer(f, controller.frames.result(f.timestamp)); progress((i + 1f) / (zsl.size + 1))
                                 }
                             } else {
                                 controller.capture(controller.burstRequests(PHOTO_FRAMES), 3_000) { f, r, i ->
-                                    if (i == 0) refResult = r
-                                    keepRaw(f, i)
-                                    j.add(f, r); progress((i + 1f) / (PHOTO_FRAMES + 1))
+                                    picker.offer(f, r); progress((i + 1f) / (PHOTO_FRAMES + 1))
                                 }
                             }
+                            picker.finish()   // antes del frame corto: la referencia tiene que ir primero
                             // Smart HDR: un frame subexpuesto para las altas luces.
                             if (s.smartHdr) {
                                 controller.shortExposureRequest(SHORT_RATIO)?.let { req ->
@@ -670,6 +716,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                 }
+                refResult = picker.reference?.second
+                firstRaw = picker.reference?.first as? CapturedFrame.Raw
                 val count = processingCount.incrementAndGet()
                 _state.update { it.copy(capturing = false, processing = count) }
 
@@ -931,8 +979,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                             VideoRecorder(app, size, fps, caps.hevc, audio, rotation, pfd)
                         }
                     }
+                    applyVideoStabilization(s)
                     if (slow != null) controller.startHighSpeedSession(t, rec, slow.second)
                     else controller.startVideoSession(t, rec)
+                    _state.update { it.copy(digitalStabActive = controller.digitalStabilizerActive) }
                     if (s.flash == FlashMode.ON && slow == null) controller.setTorch(true)
                     rec.start()
                     recorder = rec

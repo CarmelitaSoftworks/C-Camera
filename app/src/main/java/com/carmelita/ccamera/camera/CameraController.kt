@@ -24,6 +24,8 @@ import android.util.Log
 import android.util.Range
 import android.util.Size
 import android.view.Surface
+import android.hardware.Sensor
+import android.hardware.SensorManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -64,6 +66,11 @@ data class PhotoSessionInfo(
 class CameraController(private val context: Context) {
 
     val manager: CameraManager = context.getSystemService(CameraManager::class.java)
+
+    init {
+        CameraCapabilities.gyroPresent =
+            context.getSystemService(SensorManager::class.java)?.getDefaultSensor(Sensor.TYPE_GYROSCOPE) != null
+    }
     private val thread = HandlerThread("ccamera").apply { start() }
     val handler = Handler(thread.looper)
 
@@ -98,6 +105,14 @@ class CameraController(private val context: Context) {
     /** Bloqueo de AE/AWB sin región (p. ej. durante una panorámica). */
     private var exposureHold = false
     private var highSpeed = false
+    /** Estabilizador digital de vídeo activo (la cámara dibuja en su textura), o null. */
+    private var stabilizer: DigitalStabilizer? = null
+    /** Usar el estabilizador digital de C Camera en las sesiones de vídeo. */
+    var digitalVideoStabilization = false
+    /** Usar la estabilización electrónica del teléfono (si la tiene) cuando no se usa la de C Camera. */
+    var halVideoStabilization = true
+    /** ¿La última sesión de vídeo quedó con el estabilizador de C Camera? */
+    val digitalStabilizerActive get() = stabilizer != null
 
     @Volatile var lastResult: TotalCaptureResult? = null
         private set
@@ -152,6 +167,8 @@ class CameraController(private val context: Context) {
         live = null
         recordSurface = null
         highSpeed = false
+        stabilizer?.release()
+        stabilizer = null
     }
 
     /**
@@ -173,7 +190,7 @@ class CameraController(private val context: Context) {
         val attempts = mutableListOf<Attempt>()
         val rawSize = caps.rawSize
         val rawOk = caps.supportsRaw && rawSize != null && rawSize.width.toLong() * rawSize.height <= maxPixels * 13 / 10
-        if (rawOk && rawSize != null && caps.canStream(ImageFormat.RAW_SENSOR, rawSize)) {
+        if (rawOk && caps.canStream(ImageFormat.RAW_SENSOR, rawSize)) {
             if (wantLive) attempts += Attempt(true, rawSize, true, true)
             attempts += Attempt(true, rawSize, true, false)
         }
@@ -182,7 +199,7 @@ class CameraController(private val context: Context) {
             if (wantLive) attempts += Attempt(false, yuv, true, true)
             attempts += Attempt(false, yuv, true, false)
         }
-        if (rawOk && rawSize != null) attempts += Attempt(true, rawSize, false, false)
+        if (rawOk) attempts += Attempt(true, rawSize, false, false)
         attempts += Attempt(false, yuv, false, false)
 
         for (a in attempts) {
@@ -225,6 +242,11 @@ class CameraController(private val context: Context) {
         previewSurface?.release()
         val surface = Surface(texture)
         previewSurface = surface
+        if (digitalVideoStabilization && startStabilized(dev, recorder.size, surface, preview, recorder)) {
+            photoInfo = null
+            updateRepeating()
+            return
+        }
         recordSurface = recorder.surface
         session = createSession(dev, listOf(surface, recorder.surface)) ?: error("La cámara no admite esta configuración de vídeo")
         photoInfo = null
@@ -241,9 +263,38 @@ class CameraController(private val context: Context) {
         previewSurface?.release()
         val surface = Surface(texture)
         previewSurface = surface
+        if (digitalVideoStabilization && startStabilized(dev, preview, surface, preview, null)) {
+            photoInfo = null
+            updateRepeating()
+            return
+        }
         session = createSession(dev, listOf(surface)) ?: error("No se pudo iniciar la vista previa")
         photoInfo = null
         updateRepeating()
+    }
+
+    /**
+     * Sesión con el estabilizador digital: la cámara entrega a una textura de OpenGL de tamaño
+     * [frameSize] y el estabilizador dibuja en la vista previa y en el grabador. Si algo falla
+     * (EGL, giroscopio...) devuelve false y queda todo como estaba para usar la sesión normal.
+     */
+    private suspend fun startStabilized(
+        dev: CameraDevice, frameSize: Size, preview: Surface, previewSize: Size, recorder: VideoRecorder?,
+    ): Boolean {
+        if (!caps.hasGyro) return false
+        val st = runCatching {
+            DigitalStabilizer(context, frameSize, caps.focalPx(frameSize.width), caps.lens == Lens.FRONT,
+                caps.sensorOrientation, caps.realtimeTimestamps).also { it.start() }
+        }.getOrElse { Log.w(TAG, "Estabilizador digital", it); return false }
+        val s = createSession(dev, listOf(st.inputSurface))
+        if (s == null) { st.release(); return false }
+        // Las salidas se conectan a EGL cuando la sesión anterior ya soltó la vista previa.
+        val ok = st.addOutput(preview, previewSize.width, previewSize.height, record = false) &&
+            (recorder == null || st.addOutput(recorder.surface, recorder.size.width, recorder.size.height, record = true))
+        if (!ok) { runCatching { s.close() }; st.release(); return false }
+        session = s
+        stabilizer = st
+        return true
     }
 
     /**
@@ -305,8 +356,13 @@ class CameraController(private val context: Context) {
             return
         }
         val b = dev.createCaptureRequest(if (videoMode) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW)
-        b.addTarget(surface)
-        recordSurface?.let { b.addTarget(it) }
+        val stab = stabilizer
+        if (stab != null) {
+            b.addTarget(stab.inputSurface)
+        } else {
+            b.addTarget(surface)
+            recordSurface?.let { b.addTarget(it) }
+        }
         if (!videoMode) {
             val info = photoInfo
             if (info?.zsl == true) reader?.surface?.let { b.addTarget(it) }
@@ -321,7 +377,14 @@ class CameraController(private val context: Context) {
             }
         } else {
             b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(videoFps, videoFps))
-            if (caps.videoStabilization) b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+            // Estabilización electrónica del teléfono, salvo que se use la de C Camera (no se suman).
+            val halMode = when {
+                stab != null || !halVideoStabilization -> CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+                caps.videoStabilization -> CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                caps.previewStabilization && Build.VERSION.SDK_INT >= 33 -> CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION
+                else -> CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+            }
+            b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, halMode)
         }
         apply3A(b, captureFlash = false)
         if (videoMode && torch && caps.hasFlash) b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH)
@@ -351,7 +414,7 @@ class CameraController(private val context: Context) {
         }
         b.set(CaptureRequest.CONTROL_AE_MODE, aeMode)
         val manualExp = p?.iso != null && p.exposureNs != null && caps.manualSensor
-        if (manualExp && p != null) {
+        if (manualExp) {
             val er = caps.exposureRange
             val ir = caps.isoRange
             val t = p.exposureNs!!.let { if (er != null) it.coerceIn(er.lower, er.upper) else it }

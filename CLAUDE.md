@@ -21,7 +21,8 @@ mensajes al usuario **en español**.
 - `./gradlew assembleDebug`, `assembleRelease` y `testDebugUnitTest` compilan y pasan (9-nov-2026,
   en local con SDK 35, build-tools 35, cmake 3.22.1 y el NDK por defecto de AGP 8.9.1).
 - El motor C++ y el Kotlin puro (EXIF, Motion Photo, QR) sí están probados.
-- **Sin compilar todavía** (el usuario pidió compilar sólo cuando lo diga): modos Time-lapse,
+- 9-nov-2026: compila (debug y release, con lint) y pasan las 14 pruebas JVM y las nativas.
+  **Nada de lo siguiente se ha probado en un teléfono todavía**: modos Time-lapse,
   Cámara lenta (sesión de alta velocidad), Panorámica (`PanoramaStitcher`, con prueba JVM) y Pro
   (ISO, velocidad, balance de blancos, foco); temporizador, ráfaga manteniendo el disparador,
   bloqueo AE/AF con pulsación larga, compensación de exposición deslizando, macro, cuadrícula,
@@ -30,7 +31,10 @@ mensajes al usuario **en español**.
   que crece con la distancia al sujeto, apertura ƒ1,4–ƒ16, 6 iluminaciones (natural, estudio,
   contorno, escenario, escenario mono, clave alta mono), aviso en vivo de persona y teleobjetivo
   2-3x si lo hay. Ubicación: desactivada por defecto; "Compartir sin ubicación" (ExifWriter.stripGps)
-  envía una copia sin GPS. Al compilar, esperar algún error de tipos.
+  envía una copia sin GPS. Estabilización (Ajustes): Automática / C Camera / Desactivada. Fotos:
+  ReferencePicker elige el fotograma más nítido como referencia. Vídeo: DigitalStabilizer
+  (giroscopio + OpenGL, recorte 1,2x) si el teléfono no tiene EIS propio; signos de los ejes en
+  StabilizationMath (si en el teléfono el temblor aumenta en vez de bajar, revisar esos signos).
 - No se ha probado en ningún teléfono.
 
 ### Siguiente paso

@@ -186,11 +186,11 @@ struct GainField {
     }
 };
 
-Plane localGain(const LowRes& lr, const FinishParams& p) {
+Plane localGain(const LowRes& lr, const FinishParams& p, float pre) {
     if (!p.smartHdr) return Plane(1, 1, 1.f);
     Plane lum(lr.r.w, lr.r.h);
     for (size_t i = 0; i < lum.d.size(); i++)
-        lum.d[i] = 0.2126f * lr.r.d[i] + 0.7152f * lr.g.d[i] + 0.0722f * lr.b.d[i];
+        lum.d[i] = pre * (0.2126f * lr.r.d[i] + 0.7152f * lr.g.d[i] + 0.0722f * lr.b.d[i]);
     // La exposición sintética más oscura se adapta a las luces de la escena (percentil 99),
     // así una ventana o un cielo muy brillantes conservan textura.
     std::vector<float> sorted(lum.d);
@@ -211,9 +211,42 @@ Plane localGain(const LowRes& lr, const FinishParams& p) {
     return g;
 }
 
+}  // namespace
+
+float autoBrightnessGain(const std::vector<float>& lum, bool smartHdr, float maxGain) {
+    if (lum.empty() || maxGain <= 1.f) return 1.f;
+    std::vector<float> s(lum);
+    auto pct = [&](float q) {
+        size_t k = std::min(s.size() - 1, size_t(s.size() * q));
+        std::nth_element(s.begin(), s.begin() + k, s.end());
+        return std::max(s[k], 1e-5f);
+    };
+    // Medio tono: la media geométrica de la mitad central pesa la escena entera, no sólo el
+    // fondo brillante (en contraluz el sujeto queda en esa mitad).
+    float p25 = pct(0.25f), p50 = pct(0.5f), p75 = pct(0.75f);
+    float key = std::exp((std::log(p25) + 2.f * std::log(p50) + std::log(p75)) / 4.f);
+    const float target = 0.14f;                 // ≈ 0,41 en sRGB
+    float g = target / key;
+    // Límite por luces: con Smart HDR las luces se comprimen, así que admite más.
+    float p99 = pct(0.99f);
+    float hiLimit = (smartHdr ? 1.6f : 0.95f) / p99;
+    g = std::min(g, hiLimit);
+    return std::min(std::max(g, 1.f), maxGain);
+}
+
+namespace {
+
 GainField makeField(const LowRes& lr, const FinishParams& p) {
     GainField gf;
-    gf.gain = localGain(lr, p);
+    float A = 1.f;
+    if (p.autoBrightness) {
+        std::vector<float> lum(lr.r.d.size());
+        for (size_t i = 0; i < lum.size(); i++)
+            lum[i] = 0.2126f * lr.r.d[i] + 0.7152f * lr.g.d[i] + 0.0722f * lr.b.d[i];
+        A = autoBrightnessGain(lum, p.smartHdr, p.maxAutoGain);
+    }
+    gf.gain = localGain(lr, p, A);
+    for (auto& v : gf.gain.d) v *= A;
     gf.logLum = Plane(lr.r.w, lr.r.h);
     for (size_t i = 0; i < gf.logLum.d.size(); i++)
         gf.logLum.d[i] = std::log(std::max(0.2126f * lr.r.d[i] + 0.7152f * lr.g.d[i] + 0.0722f * lr.b.d[i], 1e-4f));

@@ -25,7 +25,14 @@ struct FinishParams {
     float sharpen = 0.7f;
     float hdrHeadroom = 4.f;   // ratio máximo del mapa de ganancia (Ultra HDR)
     bool gainMap = true;
+    // Brillo automático: sube la exposición global si la escena quedó oscura (como el iPhone,
+    // que no se queda con la exposición del sensor tal cual). Nunca oscurece.
+    bool autoBrightness = true;
+    float maxAutoGain = 2.5f;
 };
+
+/** Ganancia global del brillo automático para una luma lineal de baja resolución (>= 1). */
+float autoBrightnessGain(const std::vector<float>& lum, bool smartHdr, float maxGain);
 
 struct GainMapOut {
     int w = 0, h = 0;

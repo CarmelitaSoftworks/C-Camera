@@ -4,6 +4,9 @@
 #include <cstdlib>
 #include <random>
 #include <string>
+#include <vector>
+#include <cmath>
+#include <algorithm>
 
 #include "../core/finish.h"
 
@@ -240,9 +243,28 @@ static void testLanczos() {
     CHECK(mx < 1e-4f, "una imagen constante debe seguir constante (%g)", mx);
 }
 
+static void testAutoBrightness() {
+    std::printf("Brillo automático\n");
+    // Escena oscura a contraluz: el 80 %% en sombra (0,02 lineal), un 20 %% de pared a 0,3.
+    std::vector<float> dark(10000, 0.02f);
+    for (size_t i = 0; i < 2000; i++) dark[i] = 0.3f;
+    float g = autoBrightnessGain(dark, true, 2.5f);
+    CHECK(g > 1.8f, "una escena oscura debería aclararse (ganancia %.2f)", g);
+    CHECK(g <= 2.5f, "la ganancia debe respetar el máximo (%.2f)", g);
+    // Escena bien expuesta: no se toca.
+    std::vector<float> ok(10000, 0.18f);
+    CHECK(autoBrightnessGain(ok, true, 2.5f) == 1.f, "una escena bien expuesta no debería cambiar");
+    // Luces casi al máximo sin Smart HDR: no se aclara para no quemarlas.
+    std::vector<float> hi(10000, 0.03f);
+    for (size_t i = 0; i < 500; i++) hi[i] = 0.95f;
+    CHECK(autoBrightnessGain(hi, false, 2.5f) < 1.05f, "sin Smart HDR no debería quemar las luces");
+    std::printf("  ganancia escena a contraluz: %.2f\n", g);
+}
+
 int main(int argc, char** argv) {
     const char* outDir = argc > 1 ? argv[1] : ".";
     testLanczos();
+    testAutoBrightness();
     testYuv(outDir);
     testRaw(outDir);
     if (failures) { std::printf("%d fallos\n", failures); return 1; }

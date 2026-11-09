@@ -8,7 +8,11 @@ import android.os.ParcelFileDescriptor
 import android.util.Size
 import android.view.Surface
 
-/** Grabación de vídeo con MediaRecorder (H.264 o HEVC + AAC). */
+/**
+ * Grabación de vídeo con MediaRecorder (H.264 o HEVC + AAC).
+ * El audio sólo se activa si el permiso RECORD_AUDIO está concedido (lo comprueba quien la crea).
+ */
+@SuppressLint("MissingPermission")
 class VideoRecorder(
     context: Context,
     val size: Size,
@@ -51,7 +55,6 @@ class VideoRecorder(
         surface = recorder.surface
     }
 
-    @SuppressLint("MissingPermission")
     fun start() { recorder.start(); started = true }
 
     /** Para y libera. Devuelve false si no llegó a grabarse nada válido. */

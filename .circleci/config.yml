@@ -1,0 +1,80 @@
+# Compila C Camera en CircleCI.
+# Funciona en dos casos:
+#  - el repositorio contiene el proyecto descomprimido (gradlew en la raíz), o
+#  - el repositorio sólo contiene C-Camera.zip (se descomprime y se compila c-camera/).
+version: 2.1
+
+jobs:
+  compilar-apk:
+    docker:
+      - image: eclipse-temurin:17-jdk
+    resource_class: medium
+    environment:
+      ANDROID_HOME: /opt/android-sdk
+      ANDROID_SDK_ROOT: /opt/android-sdk
+      # El contenedor tiene 4 GB: limitar Gradle y Kotlin para que no se queden sin memoria.
+      GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx2g -XX:MaxMetaspaceSize=512m" -Dkotlin.daemon.jvm.options="-Xmx1g" -Dorg.gradle.workers.max=2
+    steps:
+      - checkout
+      - run:
+          name: Herramientas del sistema
+          command: apt-get update -qq && apt-get install -y -qq unzip wget cmake g++ git > /dev/null
+      - run:
+          name: Preparar el proyecto
+          command: |
+            if [ -f gradlew ]; then
+              echo "Proyecto en la raíz del repositorio"
+              ln -s "$PWD" /tmp/proyecto
+            elif [ -f C-Camera.zip ]; then
+              unzip -q -o C-Camera.zip -d /tmp/zip
+              ln -s /tmp/zip/c-camera /tmp/proyecto
+            else
+              echo "No encuentro ni gradlew ni C-Camera.zip en el repositorio"; exit 1
+            fi
+      - restore_cache:
+          keys:
+            - android-sdk-v1
+      - run:
+          name: Android SDK (cmdline-tools + licencias)
+          command: |
+            if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
+              wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdtools.zip
+              mkdir -p "$ANDROID_HOME/cmdline-tools"
+              unzip -q /tmp/cmdtools.zip -d "$ANDROID_HOME/cmdline-tools"
+              mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+            fi
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - run:
+          name: Pruebas del motor nativo (C++)
+          working_directory: /tmp/proyecto
+          command: |
+            cmake -S app/src/main/cpp/tests -B build-tests -DCMAKE_BUILD_TYPE=Release > /dev/null
+            cmake --build build-tests -j2 > /dev/null
+            mkdir -p /tmp/salida/pruebas && ./build-tests/foton_tests /tmp/salida/pruebas
+      - run:
+          name: Compilar APK (debug)
+          working_directory: /tmp/proyecto
+          no_output_timeout: 30m
+          command: |
+            chmod +x gradlew
+            ./gradlew --no-daemon --stacktrace assembleDebug
+            mkdir -p /tmp/salida
+            cp app/build/outputs/apk/debug/*.apk /tmp/salida/C-Camera-debug.apk
+      - run:
+          name: Pruebas Kotlin
+          working_directory: /tmp/proyecto
+          command: ./gradlew --no-daemon testDebugUnitTest
+      - save_cache:
+          key: android-sdk-v1
+          paths:
+            - /opt/android-sdk
+            - ~/.gradle/caches
+            - ~/.gradle/wrapper
+      - store_artifacts:
+          path: /tmp/salida
+          destination: c-camera
+
+workflows:
+  compilar:
+    jobs:
+      - compilar-apk

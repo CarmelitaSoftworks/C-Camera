@@ -72,6 +72,7 @@ fun SettingsSheet(state: CameraUiState, vm: CameraViewModel) {
                 }
             }
             Toggle("Smart HDR", state.smartHdr, vm::toggleHdr)
+            Toggle("Noche automática con poca luz", state.autoNight, vm::toggleAutoNight)
             if (state.ultraHdr) Toggle("Ultra HDR (brilla en pantallas HDR)", state.ultraHdrOn, vm::toggleUltraHdr)
             Toggle("Fotos en vivo", state.livePhoto, vm::toggleLive)
             if (state.rawActive) Toggle("Guardar también RAW (DNG)", state.saveDng, vm::toggleDng)

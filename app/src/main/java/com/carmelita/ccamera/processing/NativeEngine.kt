@@ -48,7 +48,7 @@ object NativeEngine {
     external fun process(
         session: Long, bitmap: Bitmap, meta: FloatArray?, lsc: FloatArray?, lscW: Int, lscH: Int,
         exposure: Float, smartHdr: Boolean, style: Int, sharpen: Float, wantGainMap: Boolean, headroom: Float,
-        autoBrightness: Boolean,
+        autoBrightness: Boolean, saturation: Float,
     ): ByteArray?
 
     external fun gainMapSize(session: Long): IntArray

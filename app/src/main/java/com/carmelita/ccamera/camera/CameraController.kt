@@ -189,7 +189,11 @@ class CameraController(private val context: Context) {
         data class Attempt(val raw: Boolean, val size: Size, val zsl: Boolean, val live: Boolean)
         val attempts = mutableListOf<Attempt>()
         val rawSize = caps.rawSize
-        val rawOk = caps.supportsRaw && rawSize != null && rawSize.width.toLong() * rawSize.height <= maxPixels * 13 / 10
+        // Cámara frontal sin RAW: muchas usan sensores quad-Bayer cuyo RAW no sigue el patrón
+        // Bayer normal (una foto de retrato salió con la cara repetida en franjas y rojo/azul
+        // cambiados). El YUV de la frontal ya viene bien procesado.
+        val rawOk = caps.lens == Lens.BACK && caps.supportsRaw && rawSize != null &&
+            rawSize.width.toLong() * rawSize.height <= maxPixels * 13 / 10
         if (rawOk && caps.canStream(ImageFormat.RAW_SENSOR, rawSize)) {
             if (wantLive) attempts += Attempt(true, rawSize, true, true)
             attempts += Attempt(true, rawSize, true, false)
@@ -281,7 +285,8 @@ class CameraController(private val context: Context) {
     private suspend fun startStabilized(
         dev: CameraDevice, frameSize: Size, preview: Surface, previewSize: Size, recorder: VideoRecorder?,
     ): Boolean {
-        if (!caps.hasGyro) return false
+        // Sólo cámara trasera: en la frontal la textura viene en espejo y la corrección se invertiría.
+        if (!caps.hasGyro || caps.lens == Lens.FRONT) return false
         val st = runCatching {
             DigitalStabilizer(context, frameSize, caps.focalPx(frameSize.width), caps.lens == Lens.FRONT,
                 caps.sensorOrientation, caps.realtimeTimestamps).also { it.start() }
@@ -640,8 +645,10 @@ class CameraController(private val context: Context) {
             val b = stillBuilder()
             if (exp != null && ir != null && caps.manualSensor) {
                 val (t0, iso0) = exp
-                val product = t0.toDouble() * iso0 * 1.6        // algo más de luz: +2/3 EV
-                val maxT = 1_000_000_000.0 / 6                 // 1/6 s a pulso (con OIS)
+                // Más luz real que la vista previa (+1,3 EV): menos ruido que subirla después.
+                // Referencia: la cámara de fábrica de un vivo V30 captó ~11x más luz en la misma escena.
+                val product = t0.toDouble() * iso0 * 2.5
+                val maxT = 1_000_000_000.0 / 8                 // 1/8 s a pulso con OIS (menos trepidación de sujetos)
                 val t = (product / max(ir.lower, 50)).coerceAtMost(if (caps.ois) maxT else maxT / 2).coerceAtLeast(t0.toDouble())
                 val iso = (product / t).roundToInt()
                 b.manualExposure(t.toLong(), iso)

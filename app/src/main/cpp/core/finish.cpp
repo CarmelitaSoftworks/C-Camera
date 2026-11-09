@@ -24,8 +24,8 @@ namespace {
 // ---------------- Tono y color (común a RAW y YUV) ----------------
 
 struct Renderer {
-    float warmR, warmB, contrast, vib;
-    explicit Renderer(Style s) {
+    float warmR, warmB, contrast, vib, satMul;
+    explicit Renderer(Style s, float saturation = 1.f) : satMul(saturation) {
         StyleParams p = styleParams(s);
         warmR = 1.f + 0.06f * p.warmth;
         warmB = 1.f - 0.06f * p.warmth;
@@ -65,6 +65,8 @@ struct Renderer {
         float fac = 1.f + vib * (0.35f + 0.65f * (1.f - sat));
         bool skin = r >= g && g >= b && sat > 0.05f && sat < 0.6f && (g - b) > 0.25f * (r - b);
         if (skin) fac = 1.f + (fac - 1.f) * 0.55f;
+        // Saturación extra (con ISO alto la reducción de ruido de croma se lleva color).
+        fac *= skin ? 1.f + (satMul - 1.f) * 0.5f : satMul;
         o[0] = clamp01(l + (r - l) * fac);
         o[1] = clamp01(l + (g - l) * fac);
         o[2] = clamp01(l + (b - l) * fac);
@@ -443,7 +445,7 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
     hr = Plane(); hg = Plane(); hb = Plane();
     GainField field = makeField(lr, p);
     const Plane& gain = field.gain;
-    Renderer rd(p.style);
+    Renderer rd(p.style, p.saturation);
     if (p.gainMap) buildGainMap(lr, gain, rd, p.hdrHeadroom, gm);
 
     // 4) Mosaico RGGB canónico + demosaico Malvar-He-Cutler + render por franjas.
@@ -556,7 +558,7 @@ void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, 
     });
     GainField field = makeField(lr, p);
     const Plane& gain = field.gain;
-    Renderer rd(p.style);
+    Renderer rd(p.style, p.saturation);
     if (p.gainMap) buildGainMap(lr, gain, rd, p.hdrHeadroom, gm);
 
     float gsx = gain.w / float(w), gsy = gain.h / float(h);

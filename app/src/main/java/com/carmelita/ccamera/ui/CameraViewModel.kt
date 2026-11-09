@@ -174,6 +174,12 @@ data class CameraUiState(
     val hasGyro: Boolean = false,
     /** La vista previa / grabación de vídeo actual usa el estabilizador de C Camera. */
     val digitalStabActive: Boolean = false,
+    /** Noche automática en Foto cuando hay poca luz (como el iPhone y las cámaras de fábrica). */
+    val autoNight: Boolean = true,
+    /** Ahora mismo hay poca luz (ISO alto en la vista previa). */
+    val lowLight: Boolean = false,
+    /** La captura en curso es de noche (para pedir que no se mueva el teléfono). */
+    val nightCapture: Boolean = false,
 ) {
     val ev: Float get() = evIndex * evStep
 }
@@ -207,6 +213,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             portraitLight = runCatching { PortraitLighting.valueOf(prefs.getString("portraitLight", null) ?: "") }
                 .getOrDefault(PortraitLighting.NATURAL),
             shareWithoutLocation = prefs.getBoolean("shareNoLocation", true),
+            autoNight = prefs.getBoolean("autoNight", true),
             stabilization = runCatching { Stabilization.valueOf(prefs.getString("stabilization", null) ?: "") }
                 .getOrDefault(Stabilization.AUTO),
         )
@@ -239,7 +246,24 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         if (info.totalMem >= 6L shl 30) 16_000_000L else if (info.totalMem >= 4L shl 30) 13_000_000L else 8_500_000L
     }
 
-    init { startQrLoop(); startPortraitLoop() }
+    init { startQrLoop(); startPortraitLoop(); startLowLightLoop() }
+
+    fun toggleAutoNight() { val v = !_state.value.autoNight; pref("autoNight", v); _state.update { it.copy(autoNight = v) } }
+
+    /** ¿Hay poca luz ahora? (ISO del AE en la vista previa). */
+    private fun isLowLight(): Boolean = (controller.currentExposure()?.second ?: 0) >= AUTO_NIGHT_ISO
+
+    /** Indicador "Noche auto": revisa la luz cada ~0,6 s en modo Foto. */
+    private fun startLowLightLoop() {
+        viewModelScope.launch {
+            while (isActive) {
+                delay(600)
+                val s = _state.value
+                val low = s.mode == CaptureMode.PHOTO && s.autoNight && !s.capturing && controller.isOpen && isLowLight()
+                if (low != s.lowLight) _state.update { it.copy(lowLight = low) }
+            }
+        }
+    }
 
     // ---------------- Ciclo de vida ----------------
 
@@ -663,6 +687,11 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 job = j
                 val flashNeeded = caps.hasFlash && s.mode != CaptureMode.PRO &&
                     (s.flash == FlashMode.ON || (s.flash == FlashMode.AUTO && controller.flashRequired()))
+                // ISO que pide el AE ahora (antes de la ráfaga): decide noche automática y saturación.
+                val aeIso = controller.currentExposure()?.second ?: 0
+                val autoNight = s.mode == CaptureMode.PHOTO && s.autoNight && !flashNeeded && aeIso >= AUTO_NIGHT_ISO
+                val night = s.mode == CaptureMode.NIGHT || autoNight
+                if (night) _state.update { it.copy(nightCapture = true) }
                 // Estabilización digital de fotos: el fotograma más nítido de los primeros es la referencia.
                 val picker = ReferencePicker(enabled = photoStabilization(s)) { f, r -> j.add(f, r) }
 
@@ -673,8 +702,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                             controller.captureWithFlash { f, r, _ -> picker.offer(f, r); progress(1f) }
                             picker.finish()
                         }
-                        s.mode == CaptureMode.NIGHT -> {
-                            kind = "Noche"
+                        night -> {
+                            kind = if (autoNight) "Noche auto" else "Noche"
                             controller.frames.setPaused(true)
                             try {
                                 val (reqs, t) = controller.nightRequests(NIGHT_FRAMES)
@@ -719,13 +748,16 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 refResult = picker.reference?.second
                 firstRaw = picker.reference?.first as? CapturedFrame.Raw
                 val count = processingCount.incrementAndGet()
-                _state.update { it.copy(capturing = false, processing = count) }
+                _state.update { it.copy(capturing = false, nightCapture = false, processing = count) }
 
                 val manualExp = s.mode == CaptureMode.PRO && s.pro.iso != null && s.pro.exposureNs != null
                 val params = DevelopParams(
                     style = s.style, smartHdr = s.smartHdr,
-                    sharpen = when { kind == "Noche" -> 0.5f; kind == "Flash" -> 0.6f; else -> 0.7f },
-                    exposure = if (kind == "Noche") 1.15f else 1f,
+                    sharpen = when { night -> 0.5f; kind == "Flash" -> 0.6f; else -> 0.7f },
+                    // La noche automática aclara algo más (la escena estaba oscura; el brillo automático
+                    // del motor hace el resto).
+                    exposure = when { autoNight -> 1.15f; else -> 1f },
+                    saturation = when { aeIso >= 3200 -> 1.3f; aeIso >= 1600 -> 1.2f; aeIso >= 800 -> 1.1f; else -> 1f },
                     ultraHdr = caps.ultraHdr && s.ultraHdrOn,
                     autoBrightness = !manualExp,
                 )
@@ -748,7 +780,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 val busy = if (_state.value.capturing) processingCount.get() else processingCount.decrementAndGet().coerceAtLeast(0)
                 _state.update {
                     it.copy(
-                        capturing = false, processing = busy,
+                        capturing = false, nightCapture = false, processing = busy,
                         message = if (e is OutOfMemoryError) "Memoria insuficiente para procesar la foto" else "No se pudo hacer la foto: ${e.message}",
                     )
                 }
@@ -1075,5 +1107,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         /** Time-lapse: 2 fotogramas por segundo reproducidos a 30 → 15x más rápido. */
         private const val TIMELAPSE_CAPTURE_FPS = 2.0
         private const val SHARE_CACHE_MAX_AGE_MS = 60 * 60_000L
+        /** A partir de este ISO en la vista previa, Foto usa la captura de noche. */
+        private const val AUTO_NIGHT_ISO = 1600
     }
 }

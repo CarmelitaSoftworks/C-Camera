@@ -29,6 +29,8 @@ struct FinishParams {
     // que no se queda con la exposición del sensor tal cual). Nunca oscurece.
     bool autoBrightness = true;
     float maxAutoGain = 2.5f;
+    /** Multiplicador de saturación (1 = el del estilo). */
+    float saturation = 1.f;
 };
 
 /** Ganancia global del brillo automático para una luma lineal de baja resolución (>= 1). */

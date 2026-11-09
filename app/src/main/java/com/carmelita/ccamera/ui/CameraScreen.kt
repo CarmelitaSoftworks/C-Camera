@@ -187,7 +187,7 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
                         state.qr?.let { QrChip(it.title, it.subtitle, vm::onQrTap) }
                     }
                     AnimatedVisibility(state.capturing, enter = fadeIn(), exit = fadeOut()) {
-                        CaptureHint(state.mode, state.captureProgress)
+                        CaptureHint(state.nightCapture, state.captureProgress)
                     }
                     AnimatedVisibility(showStyles && !video, enter = fadeIn(), exit = fadeOut()) {
                         StylePicker(state.style, vm::setStyle)
@@ -333,6 +333,7 @@ private fun TopBar(
         }
         when {
             state.mode == CaptureMode.NIGHT -> Pill(Icons.Filled.NightsStay, "Noche")
+            state.mode == CaptureMode.PHOTO && state.lowLight -> Pill(Icons.Filled.NightsStay, "Noche auto")
             state.mode == CaptureMode.PORTRAIT -> SmallToggle("ƒ${fmtF(state.portraitF)}", apertureOpen, onAperture)
             state.mode == CaptureMode.SLOWMO -> Text(state.slowMoLabel?.let { "$it fps" } ?: "No disponible",
                 color = Yellow, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -435,12 +436,12 @@ private fun ShutterFlash(trigger: Long) {
 }
 
 @Composable
-private fun CaptureHint(mode: CaptureMode, progress: Float) {
+private fun CaptureHint(night: Boolean, progress: Float) {
     Column(
         Modifier.clip(RoundedCornerShape(10.dp)).background(Color(0x99000000)).padding(horizontal = 14.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(if (mode == CaptureMode.NIGHT) "Mantén el teléfono quieto" else "Capturando…", color = Color.White, fontSize = 13.sp)
+        Text(if (night) "Mantén el teléfono quieto" else "Capturando…", color = Color.White, fontSize = 13.sp)
         Spacer(Modifier.height(6.dp))
         Box(Modifier.width(140.dp).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color(0x55FFFFFF))) {
             Box(Modifier.fillMaxWidth(progress.coerceIn(0f, 1f)).height(3.dp).background(Yellow))

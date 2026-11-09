@@ -113,7 +113,12 @@ class DigitalStabilizer(
     lateinit var inputSurface: Surface
         private set
 
-    private class Target(val surface: Surface, val egl: EGLSurface, val w: Int, val h: Int, val record: Boolean)
+    /**
+     * Una salida. [pre] (mat3 por columnas) pasa de la coordenada de esta salida a la de la imagen
+     * en vertical: identidad para la vista previa; para el grabador, que quiere los fotogramas en la
+     * orientación del sensor (el giro va en los metadatos del vídeo), gira SENSOR_ORIENTATION.
+     */
+    private class Target(val surface: Surface, val egl: EGLSurface, val w: Int, val h: Int, val record: Boolean, val pre: FloatArray)
     private val targets = ArrayList<Target>()
     private val texMatrix = FloatArray(16)
     private val quad: FloatBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
@@ -121,6 +126,10 @@ class DigitalStabilizer(
     @Volatile private var released = false
 
     val available get() = gyro.available
+
+    /** Tamaño de la imagen en vertical (el búfer del sensor girado SENSOR_ORIENTATION). */
+    private val uprightW = if (sensorOrientation % 180 == 0) size.width else size.height
+    private val uprightH = if (sensorOrientation % 180 == 0) size.height else size.width
 
     /** Prepara EGL y la textura de entrada (bloquea hasta que está lista). */
     fun start() {
@@ -154,7 +163,16 @@ class DigitalStabilizer(
                 if (egl != EGL14.EGL_NO_SURFACE) break
                 Thread.sleep(40)
             }
-            if (egl != EGL14.EGL_NO_SURFACE) { targets += Target(surface, egl, w, h, record); ok = true }
+            if (egl != EGL14.EGL_NO_SURFACE) {
+                // Tamaño real de la superficie (la de la vista previa puede venir girada respecto al pedido).
+                val qw = IntArray(1); val qh = IntArray(1)
+                EGL14.eglQuerySurface(display, egl, EGL14.EGL_WIDTH, qw, 0)
+                EGL14.eglQuerySurface(display, egl, EGL14.EGL_HEIGHT, qh, 0)
+                val tw = if (qw[0] > 0) qw[0] else w
+                val th = if (qh[0] > 0) qh[0] else h
+                targets += Target(surface, egl, tw, th, record, if (record) sensorToUpright(sensorOrientation) else IDENTITY)
+                ok = true
+            }
             else Log.w(TAG, "eglCreateWindowSurface falló (0x${Integer.toHexString(EGL14.eglGetError())})")
         }
         return ok
@@ -170,10 +188,12 @@ class DigitalStabilizer(
         val o = gyro.at(sensorNs)
         val stab = if (o != null) {
             val (jx, jy, jz) = path.update(sensorNs, o.first, o.second, o.third)
-            val m = StabilizationMath.contentMotion(jx, jy, jz, focalPx, front, sensorOrientation)
-            StabilizationMath.sampleMatrix(m, size.width, size.height, ZOOM)
+            // La cámara ya entrega la textura girada a vertical (su matriz de transformación lo
+            // incluye), así que el temblor se calcula y se corrige en la imagen vertical.
+            val m = StabilizationMath.contentMotion(jx, jy, jz, focalPx, front, sensorOrientation = 0)
+            StabilizationMath.sampleMatrix(m, uprightW, uprightH, ZOOM)
         } else {
-            StabilizationMath.sampleMatrix(StabilizationMath.Motion(0f, 0f, 0f), size.width, size.height, ZOOM)
+            StabilizationMath.sampleMatrix(StabilizationMath.Motion(0f, 0f, 0f), uprightW, uprightH, ZOOM)
         }
         for (t in targets) {
             if (!EGL14.eglMakeCurrent(display, t.egl, t.egl, context)) continue
@@ -183,6 +203,7 @@ class DigitalStabilizer(
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
             GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "uTex"), 1, false, texMatrix, 0)
             GLES20.glUniformMatrix3fv(GLES20.glGetUniformLocation(program, "uStab"), 1, false, stab, 0)
+            GLES20.glUniformMatrix3fv(GLES20.glGetUniformLocation(program, "uPre"), 1, false, t.pre, 0)
             val pos = GLES20.glGetAttribLocation(program, "aPos")
             GLES20.glEnableVertexAttribArray(pos)
             GLES20.glVertexAttribPointer(pos, 2, GLES20.GL_FLOAT, false, 0, quad)
@@ -263,15 +284,28 @@ class DigitalStabilizer(
         /** Recorte para tener margen de compensación (~9 % por lado), como la estabilización del teléfono. */
         const val ZOOM = 1.2f
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+        private val IDENTITY = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
+
+        /**
+         * mat3 (por columnas) que lleva una coordenada (u, v; v hacia arriba) de un fotograma en
+         * orientación del sensor a la imagen vertical (= el búfer girado [o] grados en sentido horario).
+         */
+        fun sensorToUpright(o: Int): FloatArray = when ((o % 360 + 360) % 360) {
+            90 -> floatArrayOf(0f, -1f, 0f, 1f, 0f, 0f, 0f, 1f, 1f)     // (u, v) -> (v, 1 - u)
+            180 -> floatArrayOf(-1f, 0f, 0f, 0f, -1f, 0f, 1f, 1f, 1f)   // (1 - u, 1 - v)
+            270 -> floatArrayOf(0f, 1f, 0f, -1f, 0f, 0f, 1f, 0f, 1f)    // (1 - v, u)
+            else -> IDENTITY.copyOf()
+        }
 
         private const val VERTEX = """
             attribute vec2 aPos;
             uniform mat4 uTex;
             uniform mat3 uStab;
+            uniform mat3 uPre;
             varying vec2 vTex;
             void main() {
-                vec2 uv = aPos * 0.5 + 0.5;
-                vec3 s = uStab * vec3(uv, 1.0);
+                vec3 up = uPre * vec3(aPos * 0.5 + 0.5, 1.0);
+                vec3 s = uStab * vec3(up.xy, 1.0);
                 vTex = (uTex * vec4(s.xy, 0.0, 1.0)).xy;
                 gl_Position = vec4(aPos, 0.0, 1.0);
             }

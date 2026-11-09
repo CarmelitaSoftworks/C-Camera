@@ -6,29 +6,25 @@ mensajes al usuario **en español**.
 
 ## Reglas del dueño del proyecto
 
-- **No compilar, hacer push ni publicar nada sin que el usuario lo pida.** El workflow de Actions
-  sólo corre a mano, con la etiqueta `compilar` en un PR o con un tag `v*`.
-- **No martillear la API de GitHub** (nada de bucles de sondeo cada pocos segundos). El 9-nov-2026
+- **No compilar, hacer push ni publicar nada sin que el usuario lo pida.** El pipeline de CircleCI
+  sólo corre a mano (Trigger Pipeline con `compilar` = `true`) o con un tag `v*`.
+- **No martillear ninguna API (GitLab, CircleCI, GitHub)** (nada de bucles de sondeo cada pocos segundos). El 9-nov-2026
   la cuenta de GitHub quedó suspendida justo después de una sesión automatizada que hizo push,
-  abrió el PR #1, creó una etiqueta, lanzó Actions y consultó la API cada 15 s. Hasta que se
-  resuelva la apelación, compilar en local.
+  abrió el PR #1, creó una etiqueta, lanzó Actions y consultó la API cada 15 s. El proyecto se
+  muda a GitLab + CircleCI.
 - Commits con mensajes en español.
 
 ## Estado (9-nov-2026)
 
 - Rama `c-camera-v0.2` (PR #1 en GitHub). El último commit local puede no estar subido.
-- **La app Android nunca se ha compilado de verdad.** Se comprobó el tipado de todo el Kotlin
-  contra declaraciones escritas a mano de las APIs de Android/Compose/ML Kit (0 errores), pero
-  pueden quedar diferencias con las APIs reales o reglas del compilador de Compose.
+- `./gradlew assembleDebug`, `assembleRelease` y `testDebugUnitTest` compilan y pasan (9-nov-2026,
+  en local con SDK 35, build-tools 35, cmake 3.22.1 y el NDK por defecto de AGP 8.9.1).
 - El motor C++ y el Kotlin puro (EXIF, Motion Photo, QR) sí están probados.
 - No se ha probado en ningún teléfono.
 
 ### Siguiente paso
 
-1. `./gradlew assembleDebug` y corregir errores hasta que compile (requiere Android SDK + NDK; lo
-   instala Android Studio).
-2. `./gradlew testDebugUnitTest` y las pruebas nativas (abajo).
-3. Probar en un teléfono: foto (RAW/ZSL), Smart HDR, noche, retrato, flash, vídeo 4K, Fotos en vivo
+1. Probar en un teléfono: foto (RAW/ZSL), Smart HDR, noche, retrato, flash, vídeo 4K, Fotos en vivo
    (comprobar que Google Fotos reconoce el Motion Photo), QR, exportación a Instagram y pantalla
    *Info de cámara* (qué detectó en ese teléfono).
 

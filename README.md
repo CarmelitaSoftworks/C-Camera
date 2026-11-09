@@ -66,8 +66,9 @@ app/src/main/
 
 ## Compilar
 
-El workflow de GitHub Actions **no se ejecuta solo**: lánzalo desde *Actions → Build → Run workflow*
-(o subiendo un tag `v*`, que además publica el APK en una Release).
+La compilación en CircleCI (`.circleci/config.yml`) **no se ejecuta sola**: lánzala desde
+*CircleCI → proyecto → Trigger Pipeline* con el parámetro `compilar` = `true`, o subiendo un tag `v*`.
+El APK queda en la pestaña *Artifacts* del job `apk`.
 
 En local:
 

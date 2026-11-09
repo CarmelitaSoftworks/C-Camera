@@ -1,0 +1,80 @@
+version: 2.1
+
+# Nada se compila solo. Se compila cuando tú lo indicas:
+#  - a mano: en CircleCI → proyecto → "Trigger Pipeline", con el parámetro compilar = true,
+#  - o subiendo un tag v* (git tag v0.2.0 && git push origin v0.2.0).
+# Un push normal a cualquier rama no lanza nada.
+
+parameters:
+  compilar:
+    type: boolean
+    default: false
+
+jobs:
+  pruebas-nativas:
+    docker:
+      - image: cimg/base:2024.12
+    resource_class: medium
+    steps:
+      - checkout
+      - run:
+          name: Instalar cmake
+          command: sudo apt-get update -qq && sudo apt-get install -y -qq cmake g++
+      - run:
+          name: Pruebas del motor nativo (C++ en el host)
+          command: |
+            cmake -S app/src/main/cpp/tests -B build-tests -DCMAKE_BUILD_TYPE=Release
+            cmake --build build-tests -j
+            mkdir -p test-out && ./build-tests/foton_tests test-out
+      - store_artifacts:
+          path: test-out
+          destination: imagenes-de-prueba
+
+  apk:
+    docker:
+      - image: cimg/android:2024.11.1-ndk
+    resource_class: large
+    environment:
+      GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.workers.max=4
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - gradle-v1-{{ checksum "app/build.gradle.kts" }}-{{ checksum "build.gradle.kts" }}
+            - gradle-v1-
+      - run:
+          name: Pruebas Kotlin (JVM)
+          command: ./gradlew testDebugUnitTest
+      - run:
+          name: Compilar APK
+          command: ./gradlew assembleRelease
+      - save_cache:
+          key: gradle-v1-{{ checksum "app/build.gradle.kts" }}-{{ checksum "build.gradle.kts" }}
+          paths:
+            - ~/.gradle/caches
+            - ~/.gradle/wrapper
+      - store_test_results:
+          path: app/build/test-results
+      - store_artifacts:
+          path: app/build/outputs/apk/release
+          destination: c-camera-apk
+
+workflows:
+  # Lanzado a mano con compilar = true.
+  compilar:
+    when: << pipeline.parameters.compilar >>
+    jobs:
+      - pruebas-nativas
+      - apk:
+          requires: [pruebas-nativas]
+
+  # Lanzado por un tag v*.
+  release:
+    when:
+      matches:
+        pattern: "^v.*"
+        value: << pipeline.git.tag >>
+    jobs:
+      - pruebas-nativas
+      - apk:
+          requires: [pruebas-nativas]

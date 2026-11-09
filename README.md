@@ -66,9 +66,8 @@ app/src/main/
 
 ## Compilar
 
-La compilación en CircleCI (`.circleci/config.yml`) **no se ejecuta sola**: lánzala desde
-*CircleCI → proyecto → Trigger Pipeline* con el parámetro `compilar` = `true`, o subiendo un tag `v*`.
-El APK queda en la pestaña *Artifacts* del job `apk`.
+La compilación en GitLab CI (`.gitlab-ci.yml`) **no se ejecuta sola**: lánzala desde
+*Build → Pipelines → Run pipeline*, o creando un tag `v*`. El APK queda en los artefactos del job `apk`.
 
 En local:
 

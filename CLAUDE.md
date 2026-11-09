@@ -6,17 +6,18 @@ mensajes al usuario **en español**.
 
 ## Reglas del dueño del proyecto
 
-- **No compilar, hacer push ni publicar nada sin que el usuario lo pida.** El pipeline de GitLab CI
-  sólo corre a mano (Build → Pipelines → Run pipeline) o con un tag `v*`.
-- **No martillear ninguna API (GitLab, GitHub)** (nada de bucles de sondeo cada pocos segundos). El 9-nov-2026
+- **No compilar, hacer push ni publicar nada sin que el usuario lo pida.** El workflow de GitHub
+  Actions sólo corre a mano (Actions → Build → Run workflow) o con un tag `v*`; pushes y PRs no
+  lanzan nada. Compilar sólo cuando el usuario lo diga.
+- **No martillear la API de GitHub** (nada de bucles de sondeo cada pocos segundos). El 9-nov-2026
   la cuenta de GitHub quedó suspendida justo después de una sesión automatizada que hizo push,
-  abrió el PR #1, creó una etiqueta, lanzó Actions y consultó la API cada 15 s. El proyecto se
-  mudó a GitLab: https://gitlab.com/carmelitasoftworks-group/C-Camera (compila con GitLab CI).
+  abrió el PR #1, creó una etiqueta, lanzó Actions y consultó la API cada 15 s. Se recuperó
+  la cuenta y el proyecto vuelve a trabajarse sólo en GitHub (la copia de GitLab queda sin uso).
 - Commits con mensajes en español.
 
 ## Estado (9-nov-2026)
 
-- Rama `c-camera-v0.2` en GitLab.
+- Rama de trabajo en GitHub (no `c-camera-v0.2`: tiene el PR #1 con la etiqueta `compilar`).
 - `./gradlew assembleDebug`, `assembleRelease` y `testDebugUnitTest` compilan y pasan (9-nov-2026,
   en local con SDK 35, build-tools 35, cmake 3.22.1 y el NDK por defecto de AGP 8.9.1).
 - El motor C++ y el Kotlin puro (EXIF, Motion Photo, QR) sí están probados.

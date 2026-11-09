@@ -66,8 +66,8 @@ app/src/main/
 
 ## Compilar
 
-La compilación en GitLab CI (`.gitlab-ci.yml`) **no se ejecuta sola**: lánzala desde
-*Build → Pipelines → Run pipeline*, o creando un tag `v*`. El APK queda en los artefactos del job `apk`.
+El workflow de GitHub Actions **no se ejecuta solo**: lánzalo desde *Actions → Build → Run workflow*
+(o subiendo un tag `v*`, que además publica el APK en una Release). Los pushes y los PR no lanzan nada.
 
 En local:
 

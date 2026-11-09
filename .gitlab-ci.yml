@@ -1,0 +1,42 @@
+# Compila C Camera en GitLab a partir de C-Camera.zip subido a la raíz del proyecto.
+# El APK queda en: Build → Jobs → (el job) → Artifacts → Download.
+
+compilar-apk:
+  image: eclipse-temurin:17-jdk
+  timeout: 1h
+  variables:
+    ANDROID_HOME: "$CI_PROJECT_DIR/android-sdk"
+    ANDROID_SDK_ROOT: "$CI_PROJECT_DIR/android-sdk"
+    GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle-home"
+  cache:
+    key: android-sdk-y-gradle
+    paths:
+      - android-sdk/
+      - .gradle-home/caches/
+      - .gradle-home/wrapper/
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq unzip wget cmake g++ > /dev/null
+    - |
+      if [ ! -d "$ANDROID_HOME/cmdline-tools/latest" ]; then
+        wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
+        mkdir -p "$ANDROID_HOME/cmdline-tools"
+        unzip -q cmdtools.zip -d "$ANDROID_HOME/cmdline-tools"
+        mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+      fi
+    - yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+  script:
+    - unzip -q -o C-Camera.zip
+    - cd c-camera
+    # 1) Pruebas del motor nativo (rápidas, sin Android)
+    - cmake -S app/src/main/cpp/tests -B build-tests -DCMAKE_BUILD_TYPE=Release > /dev/null
+    - cmake --build build-tests -j2 > /dev/null
+    - mkdir -p test-out && ./build-tests/foton_tests test-out
+    # 2) La app (Gradle descarga solo el SDK, el NDK y CMake que falten)
+    - chmod +x gradlew
+    - ./gradlew --no-daemon --stacktrace assembleDebug
+    - cp app/build/outputs/apk/debug/*.apk "$CI_PROJECT_DIR/C-Camera-debug.apk"
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - C-Camera-debug.apk

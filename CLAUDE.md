@@ -26,7 +26,11 @@ mensajes al usuario **en español**.
   (ISO, velocidad, balance de blancos, foco); temporizador, ráfaga manteniendo el disparador,
   bloqueo AE/AF con pulsación larga, compensación de exposición deslizando, macro, cuadrícula,
   nivel, proporción 4:3/16:9/1:1, espejo frontal, ubicación en EXIF (GPS IFD), DNG opcional,
-  botones de volumen y pantalla de Ajustes. Al compilar, esperar algún error de tipos.
+  botones de volumen y pantalla de Ajustes. Retrato nuevo: desenfoque en disco (bolas de bokeh)
+  que crece con la distancia al sujeto, apertura ƒ1,4–ƒ16, 6 iluminaciones (natural, estudio,
+  contorno, escenario, escenario mono, clave alta mono), aviso en vivo de persona y teleobjetivo
+  2-3x si lo hay. Ubicación: desactivada por defecto; "Compartir sin ubicación" (ExifWriter.stripGps)
+  envía una copia sin GPS. Al compilar, esperar algún error de tipos.
 - No se ha probado en ningún teléfono.
 
 ### Siguiente paso

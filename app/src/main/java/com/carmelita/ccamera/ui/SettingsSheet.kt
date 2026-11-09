@@ -75,11 +75,22 @@ fun SettingsSheet(state: CameraUiState, vm: CameraViewModel) {
             if (state.ultraHdr) Toggle("Ultra HDR (brilla en pantallas HDR)", state.ultraHdrOn, vm::toggleUltraHdr)
             Toggle("Fotos en vivo", state.livePhoto, vm::toggleLive)
             if (state.rawActive) Toggle("Guardar también RAW (DNG)", state.saveDng, vm::toggleDng)
-            Toggle("Guardar ubicación", state.saveLocation) {
+            Toggle("Incluir ubicación en las fotos", state.saveLocation) {
                 if (state.saveLocation) vm.setSaveLocation(false)
                 else if (LocationHelper.hasPermission(context)) vm.setSaveLocation(true)
                 else locationLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
             }
+            Text(
+                if (state.saveLocation) "Las fotos nuevas guardan dónde se hicieron (GPS en los metadatos)."
+                else "Desactivado: las fotos no llevan ninguna información de ubicación.",
+                color = Color(0xFF8E8E93), fontSize = 13.sp,
+            )
+            Toggle("Compartir sin ubicación", state.shareWithoutLocation, vm::toggleShareWithoutLocation)
+            Text(
+                "Al compartir una foto que tenga ubicación, se envía una copia sin ella (la de la galería no cambia). " +
+                    "Las exportaciones para Instagram nunca llevan ubicación.",
+                color = Color(0xFF8E8E93), fontSize = 13.sp,
+            )
             Toggle("Lector de QR automático", state.qrEnabled, vm::toggleQr)
 
             Section("Vídeo")

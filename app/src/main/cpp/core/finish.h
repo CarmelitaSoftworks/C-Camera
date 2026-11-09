@@ -51,8 +51,16 @@ void finish(MergeResult& m, const RawMetadata* raw, const FinishParams& p,
 // ---------------- Utilidades de salida ----------------
 
 /** Desenfoque de fondo para retrato. mask: 0..1 (1 = sujeto), de cualquier tamaño. */
+/** Iluminación de retrato (mismo orden que PortraitLighting en Kotlin). */
+enum class PortraitLight { Natural = 0, Studio = 1, Contour = 2, Stage = 3, StageMono = 4, HighKeyMono = 5 };
+
+/**
+ * Retrato: desenfoque de fondo con forma de diafragma (disco, con brillos que forman bolas de
+ * bokeh) que crece con la distancia al sujeto, + iluminación opcional.
+ * strength = radio del desenfoque respecto al ancho (≈ apertura).
+ */
 void portraitBokeh(uint8_t* rgba, int w, int h, int strideBytes,
-                   const float* mask, int mw, int mh, float strength);
+                   const float* mask, int mw, int mh, float strength, int lighting = 0);
 
 /**
  * Exportación para redes: recorta (cx, cy, cw, ch), reduce con Lanczos en luz lineal

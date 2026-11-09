@@ -53,8 +53,11 @@ object NativeEngine {
 
     external fun gainMapSize(session: Long): IntArray
 
-    /** Desenfoque de fondo; mask 0..1 (1 = sujeto) de tamaño mw x mh, alineada con el bitmap. */
-    external fun bokeh(bitmap: Bitmap, mask: FloatArray, mw: Int, mh: Int, strength: Float)
+    /**
+     * Retrato: desenfoque de fondo en disco que crece con la distancia al sujeto + iluminación.
+     * mask 0..1 (1 = sujeto) de tamaño mw x mh, alineada con el bitmap. lighting = PortraitLighting.ordinal.
+     */
+    external fun bokeh(bitmap: Bitmap, mask: FloatArray, mw: Int, mh: Int, strength: Float, lighting: Int)
 
     /** Recorte + reducción Lanczos en luz lineal + enfoque de salida. */
     external fun exportResize(src: Bitmap, cx: Int, cy: Int, cw: Int, ch: Int, dst: Bitmap, sharpen: Float)

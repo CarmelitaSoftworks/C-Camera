@@ -111,6 +111,7 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
     var showStyles by remember { mutableStateOf(false) }
+    var showAperture by remember { mutableStateOf(false) }
     var iconRotation by remember { mutableStateOf(0f) }
     val rot by animateFloatAsState(iconRotation, label = "iconRot")
 
@@ -147,7 +148,8 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
     val photoLike = !video && state.mode != CaptureMode.PANO
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         Column(Modifier.fillMaxSize().systemBarsPadding()) {
-            TopBar(state, rot, showStyles, vm, onStyles = { showStyles = !showStyles })
+            TopBar(state, rot, showStyles, vm, onStyles = { showStyles = !showStyles },
+                apertureOpen = showAperture, onAperture = { showAperture = !showAperture })
 
             val previewModifier = if (video) Modifier.weight(1f).aspectRatio(9f / 16f, matchHeightConstraintsFirst = true)
             else Modifier.fillMaxWidth().aspectRatio(3f / 4f)
@@ -173,6 +175,9 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
                 if (state.recording) RecordingTimer(state.recordStartMs, Modifier.align(Alignment.TopCenter).padding(top = 10.dp))
                 else if (state.bursting) TopPill("${state.burstCount}", Modifier.align(Alignment.TopCenter).padding(top = 10.dp))
                 else if (state.aeAfLocked) TopPill("BLOQUEO AE/AF", Modifier.align(Alignment.TopCenter).padding(top = 10.dp))
+                else if (state.mode == CaptureMode.PORTRAIT) {
+                    PortraitStatus(state.portraitSubject, state.portraitLight, Modifier.align(Alignment.TopCenter).padding(top = 10.dp))
+                }
 
                 Column(
                     Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
@@ -186,6 +191,10 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
                     }
                     AnimatedVisibility(showStyles && !video, enter = fadeIn(), exit = fadeOut()) {
                         StylePicker(state.style, vm::setStyle)
+                    }
+                    if (state.mode == CaptureMode.PORTRAIT && !state.capturing && !showStyles) {
+                        if (showAperture) AperturePicker(state.portraitF, vm::setPortraitF)
+                        LightingPicker(state.portraitLight, vm::setPortraitLight)
                     }
                     Spacer(Modifier.height(10.dp))
                     ZoomChips(state.zoom, state.zoomStops, vm::setZoom)
@@ -292,7 +301,10 @@ private fun TopIcon(icon: ImageVector, desc: String, tint: Color, rot: Float, en
 }
 
 @Composable
-private fun TopBar(state: CameraUiState, rot: Float, stylesOpen: Boolean, vm: CameraViewModel, onStyles: () -> Unit) {
+private fun TopBar(
+    state: CameraUiState, rot: Float, stylesOpen: Boolean, vm: CameraViewModel, onStyles: () -> Unit,
+    apertureOpen: Boolean, onAperture: () -> Unit,
+) {
     val video = state.mode.isVideo
     val stills = !video && state.mode != CaptureMode.PANO
     Row(
@@ -321,6 +333,7 @@ private fun TopBar(state: CameraUiState, rot: Float, stylesOpen: Boolean, vm: Ca
         }
         when {
             state.mode == CaptureMode.NIGHT -> Pill(Icons.Filled.NightsStay, "Noche")
+            state.mode == CaptureMode.PORTRAIT -> SmallToggle("ƒ${fmtF(state.portraitF)}", apertureOpen, onAperture)
             state.mode == CaptureMode.SLOWMO -> Text(state.slowMoLabel?.let { "$it fps" } ?: "No disponible",
                 color = Yellow, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             state.mode == CaptureMode.TIMELAPSE -> Text("15×", color = Yellow, fontSize = 12.sp, fontWeight = FontWeight.Bold)

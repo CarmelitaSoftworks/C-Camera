@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.carmelita.ccamera.camera.CameraCapabilities
@@ -30,6 +31,7 @@ import com.carmelita.ccamera.processing.PhotoAspect
 import com.carmelita.ccamera.processing.PhotoJob
 import com.carmelita.ccamera.processing.PhotoStyle
 import com.carmelita.ccamera.processing.Portrait
+import com.carmelita.ccamera.processing.PortraitLighting
 import com.carmelita.ccamera.qr.QrActions
 import com.carmelita.ccamera.qr.QrContent
 import com.carmelita.ccamera.qr.QrScanner
@@ -148,6 +150,12 @@ data class CameraUiState(
     val panoHint: String = "",
     val bursting: Boolean = false,
     val burstCount: Int = 0,
+    // Retrato
+    val portraitF: Float = 2.8f,
+    val portraitLight: PortraitLighting = PortraitLighting.NATURAL,
+    /** null = aún no se sabe; true = hay una persona en la vista previa. */
+    val portraitSubject: Boolean? = null,
+    val shareWithoutLocation: Boolean = true,
 ) {
     val ev: Float get() = evIndex * evStep
 }
@@ -177,6 +185,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             aspect = runCatching { PhotoAspect.valueOf(prefs.getString("aspect", null) ?: "") }.getOrDefault(PhotoAspect.FOUR_THREE),
             saveDng = prefs.getBoolean("dng", false),
             ultraHdrOn = prefs.getBoolean("ultrahdr", true),
+            portraitF = prefs.getFloat("portraitF", 2.8f),
+            portraitLight = runCatching { PortraitLighting.valueOf(prefs.getString("portraitLight", null) ?: "") }
+                .getOrDefault(PortraitLighting.NATURAL),
+            shareWithoutLocation = prefs.getBoolean("shareNoLocation", true),
         )
     )
     val state: StateFlow<CameraUiState> = _state
@@ -207,7 +219,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         if (info.totalMem >= 6L shl 30) 16_000_000L else if (info.totalMem >= 4L shl 30) 13_000_000L else 8_500_000L
     }
 
-    init { startQrLoop() }
+    init { startQrLoop(); startPortraitLoop() }
 
     // ---------------- Ciclo de vida ----------------
 
@@ -334,9 +346,47 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         val st = _state.value
         val old = st.mode
         if (old == m || st.recording || st.capturing || st.panoActive || st.bursting || st.countdown > 0) return
-        _state.update { it.copy(mode = m, qr = null) }
+        _state.update { it.copy(mode = m, qr = null, portraitSubject = null) }
         if (old.isVideo != m.isVideo) reconfigure()
         else viewModelScope.launch { camMutex.withLock { if (controller.isOpen) applyModeControls(_state.value) } }
+        // Retrato con el teleobjetivo si lo hay (2-3x: perspectiva más favorecedora, como el iPhone).
+        if (m == CaptureMode.PORTRAIT) {
+            st.zoomStops.firstOrNull { it.optical && it.ratio in 1.8f..3.5f }?.let { setZoom(it.ratio) }
+        } else if (old == CaptureMode.PORTRAIT && st.zoom > 1.01f) {
+            setZoom(1f)
+        }
+    }
+
+    fun setPortraitF(f: Float) { prefs.edit().putFloat("portraitF", f).apply(); _state.update { it.copy(portraitF = f) } }
+    fun setPortraitLight(l: PortraitLighting) {
+        prefs.edit().putString("portraitLight", l.name).apply()
+        _state.update { it.copy(portraitLight = l) }
+    }
+    fun toggleShareWithoutLocation() {
+        val v = !_state.value.shareWithoutLocation
+        pref("shareNoLocation", v)
+        _state.update { it.copy(shareWithoutLocation = v) }
+    }
+
+    /** Aviso en vivo del retrato: comprueba cada ~0,7 s si hay una persona en la vista previa. */
+    private fun startPortraitLoop() {
+        viewModelScope.launch {
+            while (isActive) {
+                delay(700)
+                val s = _state.value
+                if (s.mode != CaptureMode.PORTRAIT || s.capturing || s.viewer != null || !controller.isOpen) {
+                    if (s.portraitSubject != null && s.mode != CaptureMode.PORTRAIT) _state.update { it.copy(portraitSubject = null) }
+                    continue
+                }
+                val bmp = runCatching { previewFrameProvider?.invoke() }.getOrNull() ?: continue
+                val cov = runCatching { Portrait.personCoverage(bmp) }.getOrNull()
+                bmp.recycle()
+                if (cov != null) {
+                    val found = cov > 0.03f
+                    if (_state.value.portraitSubject != found) _state.update { it.copy(portraitSubject = found) }
+                }
+            }
+        }
     }
 
     fun setStyle(s: PhotoStyle) { prefs.edit().putString("style", s.name).apply(); _state.update { it.copy(style = s) } }
@@ -625,7 +675,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 val bmp = j.develop(params)
                 j.close(); job = null
                 if (s.mode == CaptureMode.PORTRAIT) {
-                    val ok = runCatching { Portrait.apply(bmp, rotation) }.getOrElse { Log.w(TAG, "Retrato", it); false }
+                    val ok = runCatching { Portrait.apply(bmp, rotation, Portrait.strengthFor(s.portraitF), s.portraitLight) }
+                        .getOrElse { Log.w(TAG, "Retrato", it); false }
                     if (!ok) toast("No se detectó a ninguna persona: foto sin desenfoque")
                 }
                 val clip = liveClip?.await()
@@ -672,6 +723,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             focalLengthMm = r?.get(CaptureResult.LENS_FOCAL_LENGTH),
             aperture = r?.get(CaptureResult.LENS_APERTURE),
             description = "C Camera · $kind · ${s.style.label}" + (if (s.smartHdr) " · Smart HDR" else "") +
+                (if (s.mode == CaptureMode.PORTRAIT) " · f/${s.portraitF} · ${s.portraitLight.label}" else "") +
                 (if (controller.photoInfo?.raw == true) " · RAW" else "") +
                 (if (s.aspect != PhotoAspect.FOUR_THREE) " · ${s.aspect.label}" else ""),
             gps = gps,
@@ -904,10 +956,34 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Compartir. Con "Compartir sin ubicación" (por defecto), si la foto lleva GPS se comparte una
+     * copia temporal sin él; la foto de la galería no cambia.
+     */
     fun share() {
         val s = _state.value
         val uri = s.viewer ?: s.lastUri ?: return
-        InstagramExporter.shareGeneric(getApplication<Application>(), uri, if (s.lastIsVideo && s.viewer == null) "video/mp4" else "image/jpeg")
+        val app = getApplication<Application>()
+        val video = s.lastIsVideo && s.viewer == null
+        if (video || !s.shareWithoutLocation) {
+            InstagramExporter.shareGeneric(app, uri, if (video) "video/mp4" else "image/jpeg")
+            return
+        }
+        viewModelScope.launch {
+            val shareUri = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching uri
+                    if (!ExifWriter.stripGps(bytes)) return@runCatching uri
+                    val dir = File(app.cacheDir, "share").apply { mkdirs() }
+                    dir.listFiles()?.forEach { it.delete() }   // sólo la última copia
+                    val f = File(dir, "CCAM_${System.currentTimeMillis()}.jpg")
+                    f.writeBytes(bytes)
+                    FileProvider.getUriForFile(app, "${app.packageName}.files", f)
+                }.getOrElse { Log.w(TAG, "Copia sin ubicación", it); null }
+            }
+            if (shareUri == null) toast("No se pudo quitar la ubicación: no se comparte")
+            else InstagramExporter.shareGeneric(app, shareUri, "image/jpeg")
+        }
     }
 
     override fun onCleared() {

@@ -172,6 +172,19 @@ static void testRaw(const char* outDir) {
     const uint8_t* s0 = &out[(size_t(H * 0.28 - 30) * W + size_t(W * 0.2 - 30)) * 4];
     const uint8_t* s1 = &por[(size_t(H * 0.28 - 30) * W + size_t(W * 0.2 - 30)) * 4];
     CHECK(std::abs(int(s0[0]) - int(s1[0])) < 3, "el sujeto no debería cambiar");
+    // Iluminación de escenario mono: fondo negro y sujeto en gris.
+    std::vector<uint8_t> stage = out;
+    portraitBokeh(stage.data(), W, H, W * 4, mask.data(), 256, 192, 0.03f, int(PortraitLight::StageMono));
+    writePpm(std::string(outDir) + "/portrait_stage_mono.ppm", stage.data(), W, H);
+    const uint8_t* bgPx = &stage[(size_t(H * 0.65) * W + size_t(W * 0.8)) * 4];
+    const uint8_t* subj = &stage[(size_t(H * 0.28 - 30) * W + size_t(W * 0.2 - 30)) * 4];
+    CHECK(bgPx[0] < 3 && bgPx[1] < 3 && bgPx[2] < 3, "escenario: el fondo debería ser negro");
+    CHECK(subj[0] == subj[1] && subj[1] == subj[2], "escenario mono: el sujeto debería ser gris");
+    // El desenfoque cerca del sujeto es menor que lejos (profundidad aproximada).
+    std::vector<uint8_t> far = out;
+    portraitBokeh(far.data(), W, H, W * 4, mask.data(), 256, 192, 0.06f);
+    std::printf("  retrato f/1.4: gradiente del fondo %.1f\n", localVar(far));
+    CHECK(localVar(far) <= localVar(por) + 0.5, "más apertura debería desenfocar igual o más");
 
     // Exportación Instagram 3:4 y historia
     std::vector<uint8_t> ig(1080 * 1440 * 4);

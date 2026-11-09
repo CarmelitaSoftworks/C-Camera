@@ -278,3 +278,55 @@ fun EvIndicator(ev: Float, modifier: Modifier = Modifier) {
         modifier = modifier.clip(RoundedCornerShape(6.dp)).background(Color(0x66000000)).padding(horizontal = 6.dp, vertical = 2.dp),
     )
 }
+
+// ---------------- Retrato ----------------
+
+fun fmtF(f: Float): String = if (f == f.toInt().toFloat()) "${f.toInt()}" else "%.1f".format(f).replace('.', ',')
+
+/** Aviso del retrato: "LUZ NATURAL" en amarillo con persona; si no, qué falta. */
+@Composable
+fun PortraitStatus(subject: Boolean?, lighting: com.carmelita.ccamera.processing.PortraitLighting, modifier: Modifier = Modifier) {
+    when (subject) {
+        true -> TopPill(lighting.label.uppercase(), modifier)
+        false -> Text(
+            "Se necesita una persona", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            modifier = modifier.clip(RoundedCornerShape(4.dp)).background(Color(0x99000000)).padding(horizontal = 8.dp, vertical = 2.dp),
+        )
+        null -> Unit
+    }
+}
+
+/** Apertura (profundidad de campo), como el control "f" del iPhone. */
+@Composable
+fun AperturePicker(current: Float, onPick: (Float) -> Unit) {
+    Row(
+        Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        com.carmelita.ccamera.processing.Portrait.apertures.forEach { f ->
+            ProChipPublic("ƒ${fmtF(f)}", f == current) { onPick(f) }
+        }
+    }
+}
+
+@Composable
+fun LightingPicker(current: com.carmelita.ccamera.processing.PortraitLighting, onPick: (com.carmelita.ccamera.processing.PortraitLighting) -> Unit) {
+    Row(
+        Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        com.carmelita.ccamera.processing.PortraitLighting.entries.forEach { l ->
+            ProChipPublic(l.label, l == current) { onPick(l) }
+        }
+    }
+}
+
+@Composable
+fun ProChipPublic(text: String, selected: Boolean, onClick: () -> Unit) {
+    Text(
+        text, color = if (selected) Color.Black else Color.White, fontSize = 13.sp,
+        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(if (selected) Yellow else Color(0x99000000))
+            .clickable(onClick = onClick).padding(horizontal = 11.dp, vertical = 6.dp),
+    )
+}

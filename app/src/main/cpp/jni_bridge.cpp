@@ -223,12 +223,12 @@ Java_com_carmelita_ccamera_processing_NativeEngine_gainMapSize(JNIEnv* env, jobj
 
 JNIEXPORT void JNICALL
 Java_com_carmelita_ccamera_processing_NativeEngine_bokeh(
-        JNIEnv* env, jobject, jobject bitmap, jfloatArray maskArr, jint mw, jint mh, jfloat strength) {
+        JNIEnv* env, jobject, jobject bitmap, jfloatArray maskArr, jint mw, jint mh, jfloat strength, jint lighting) {
     LockedBitmap lb(env, bitmap);
     if (!lb.data()) { throwJava(env, "Bitmap no válido"); return; }
     std::vector<float> mask(size_t(mw) * mh);
     env->GetFloatArrayRegion(maskArr, 0, jsize(mask.size()), mask.data());
-    portraitBokeh(lb.data(), int(lb.info.width), int(lb.info.height), int(lb.info.stride), mask.data(), mw, mh, strength);
+    portraitBokeh(lb.data(), int(lb.info.width), int(lb.info.height), int(lb.info.stride), mask.data(), mw, mh, strength, int(lighting));
 }
 
 JNIEXPORT void JNICALL

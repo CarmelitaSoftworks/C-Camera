@@ -156,8 +156,37 @@ class PhotoJob(private val caps: CameraCapabilities, private val raw: Boolean) :
     }
 }
 
+/** Iluminación de retrato (mismo orden que foton::PortraitLight en C++). */
+enum class PortraitLighting(val label: String) {
+    NATURAL("Luz natural"),
+    STUDIO("Luz de estudio"),
+    CONTOUR("Luz de contorno"),
+    STAGE("Luz de escenario"),
+    STAGE_MONO("Escenario mono"),
+    HIGH_KEY_MONO("Clave alta mono"),
+}
+
 /** Modo retrato: segmenta a la persona (ML Kit) y desenfoca el fondo en C++. */
 object Portrait {
+    /** Aperturas que ofrece la interfaz (como el control "f" del iPhone). */
+    val apertures = listOf(1.4f, 2f, 2.8f, 4f, 5.6f, 8f, 16f)
+
+    /** Radio del desenfoque (fracción del ancho) para una apertura: f/2.8 ≈ 2,5 %. */
+    fun strengthFor(fNumber: Float): Float = (0.07f / fNumber).coerceIn(0.003f, 0.06f)
+
+    /**
+     * Fracción de la imagen ocupada por personas en un fotograma de la vista previa (ya en
+     * vertical). Para el aviso en vivo "Luz natural" / "Se necesita una persona".
+     */
+    suspend fun personCoverage(preview: Bitmap): Float {
+        val mask = segmenter.process(InputImage.fromBitmap(preview, 0)).await()
+        val fb = mask.buffer.order(ByteOrder.nativeOrder()).asFloatBuffer()
+        var n = 0
+        var total = 0
+        while (fb.hasRemaining()) { if (fb.get() > 0.5f) n++; total++ }
+        return if (total == 0) 0f else n.toFloat() / total
+    }
+
     private val segmenter by lazy {
         Segmentation.getClient(
             SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()
@@ -165,7 +194,9 @@ object Portrait {
     }
 
     /** Devuelve false si no se detecta a nadie (la foto queda sin cambios). */
-    suspend fun apply(bmp: Bitmap, rotation: Int, strength: Float = 0.025f): Boolean {
+    suspend fun apply(
+        bmp: Bitmap, rotation: Int, strength: Float = 0.025f, lighting: PortraitLighting = PortraitLighting.NATURAL,
+    ): Boolean {
         // Segmentar en vertical (la red funciona mejor con la persona derecha).
         val scale = 512f / max(bmp.width, bmp.height)
         val m = Matrix().apply { postScale(scale, scale); postRotate(rotation.toFloat()) }
@@ -180,7 +211,7 @@ object Portrait {
         if (coverage < 0.03f) return false
         // Volver a la orientación del sensor.
         val (sw, sh, sensor) = rotateMask(upright, mw, mh, (360 - rotation) % 360)
-        NativeEngine.bokeh(bmp, sensor, sw, sh, strength)
+        NativeEngine.bokeh(bmp, sensor, sw, sh, strength, lighting.ordinal)
         return true
     }
 

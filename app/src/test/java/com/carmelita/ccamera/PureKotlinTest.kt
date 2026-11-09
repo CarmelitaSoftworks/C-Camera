@@ -62,6 +62,25 @@ class PureKotlinTest {
     }
 
     @Test
+    fun stripGpsKeepsSizeAndRemovesLocation() {
+        val withGps = ExifWriter.insert(fakeJpeg(), ExifWriter.Info(orientation = 6, make = "Test",
+            gps = ExifWriter.Gps(40.4168, -3.7038, 650.0)))
+        val copy = withGps.copyOf()
+        assertTrue(ExifWriter.stripGps(copy))
+        assertEquals(withGps.size, copy.size)
+        // Lo que no es ubicación sigue igual (marca, cuerpo del JPEG).
+        assertTrue(String(copy, Charsets.ISO_8859_1).contains("Test"))
+        assertTrue(copy.copyOfRange(copy.size - 50, copy.size).contentEquals(withGps.copyOfRange(withGps.size - 50, withGps.size)))
+        // Ya no hay nada que quitar.
+        assertTrue(!ExifWriter.stripGps(copy))
+        // Sin GPS de partida: no cambia nada.
+        val plain = ExifWriter.insert(fakeJpeg(), ExifWriter.Info(orientation = 1))
+        val p2 = plain.copyOf()
+        assertTrue(!ExifWriter.stripGps(p2))
+        assertTrue(p2.contentEquals(plain))
+    }
+
+    @Test
     fun motionPhotoFromPlainJpeg() {
         val jpeg = fakeJpeg()
         val mp4 = ByteArray(5000) { (it % 251).toByte() }

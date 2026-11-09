@@ -147,6 +147,62 @@ object ExifWriter {
         return byteArrayOf(0xFF.toByte(), 0xE1.toByte(), (len shr 8).toByte(), len.toByte()) + payload
     }
 
+    /**
+     * Quita la ubicación de un JPEG (modifica [jpeg] en su sitio, sin cambiar su tamaño: así no se
+     * toca lo que va detrás, como el mapa Ultra HDR o el vídeo de la Foto en vivo).
+     * Borra los datos del GPS IFD y lo deja vacío. Devuelve true si había ubicación.
+     */
+    fun stripGps(jpeg: ByteArray): Boolean {
+        fun u8(i: Int) = jpeg[i].toInt() and 0xFF
+        if (jpeg.size < 4 || u8(0) != 0xFF || u8(1) != 0xD8) return false
+        var i = 2
+        while (i + 4 <= jpeg.size && u8(i) == 0xFF) {
+            val marker = u8(i + 1)
+            if (marker == 0xDA || marker == 0xD9) break
+            val len = (u8(i + 2) shl 8) or u8(i + 3)
+            if (len < 2) break
+            if (marker == 0xE1 && i + 10 <= jpeg.size && String(jpeg, i + 4, 6, Charsets.ISO_8859_1) == "Exif\u0000\u0000") {
+                return stripGpsInTiff(jpeg, i + 10, minOf(jpeg.size, i + 2 + len))
+            }
+            i += 2 + len
+        }
+        return false
+    }
+
+    private fun stripGpsInTiff(b: ByteArray, tiff: Int, end: Int): Boolean {
+        if (tiff + 8 > end) return false
+        val little = b[tiff].toInt() == 'I'.code
+        fun u8(i: Int) = b[i].toInt() and 0xFF
+        fun r16(i: Int) = if (little) u8(i) or (u8(i + 1) shl 8) else (u8(i) shl 8) or u8(i + 1)
+        fun r32(i: Int): Int = if (little) r16(i) or (r16(i + 2) shl 16) else (r16(i) shl 16) or r16(i + 2)
+        fun ok(i: Int, n: Int) = i >= tiff && i + n <= end
+        val ifd0 = tiff + r32(tiff + 4)
+        if (!ok(ifd0, 2)) return false
+        val n = r16(ifd0)
+        var gps = -1
+        for (k in 0 until n) {
+            val e = ifd0 + 2 + k * 12
+            if (!ok(e, 12)) return false
+            if (r16(e) == 0x8825) gps = tiff + r32(e + 8)
+        }
+        if (gps < 0 || !ok(gps, 2)) return false
+        val cnt = r16(gps)
+        val ifdLen = 2 + cnt * 12 + 4
+        if (!ok(gps, ifdLen)) return false
+        for (k in 0 until cnt) {
+            val e = gps + 2 + k * 12
+            val unit = when (r16(e + 2)) { 3, 8 -> 2; 4, 9, 11 -> 4; 5, 10, 12 -> 8; else -> 1 }
+            val size = unit.toLong() * (r32(e + 4).toLong() and 0xFFFFFFFFL)
+            if (size > 4) {
+                val off = tiff + r32(e + 8)
+                if (size <= Int.MAX_VALUE && ok(off, size.toInt())) java.util.Arrays.fill(b, off, off + size.toInt(), 0)
+            }
+        }
+        // IFD vacío: 0 entradas y "siguiente IFD" = 0.
+        java.util.Arrays.fill(b, gps, gps + ifdLen, 0)
+        return cnt > 0
+    }
+
     /** Inserta el EXIF justo después del SOI (quitando un APP1 Exif previo si lo hubiera). */
     fun insert(jpeg: ByteArray, info: Info): ByteArray {
         require(jpeg.size > 4 && (jpeg[0].toInt() and 0xFF) == 0xFF && (jpeg[1].toInt() and 0xFF) == 0xD8)

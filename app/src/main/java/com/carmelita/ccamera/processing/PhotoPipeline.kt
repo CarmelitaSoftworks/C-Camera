@@ -14,7 +14,9 @@ import com.carmelita.ccamera.camera.CapturedFrame
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.max
@@ -174,17 +176,37 @@ object Portrait {
     /** Radio del desenfoque (fracción del ancho) para una apertura: f/2.8 ≈ 2,5 %. */
     fun strengthFor(fNumber: Float): Float = (0.07f / fNumber).coerceIn(0.003f, 0.06f)
 
+    /** Un píxel de la máscara es "persona" por encima de este valor. */
+    const val PERSON_THRESHOLD = 0.5f
+    /** Fracción mínima de la imagen ocupada por personas para hacer el retrato. */
+    const val MIN_COVERAGE = 0.03f
+
+    /** Fracción de la máscara que es persona. */
+    fun coverage(mask: FloatArray): Float =
+        if (mask.isEmpty()) 0f else mask.count { it > PERSON_THRESHOLD }.toFloat() / mask.size
+
+    fun hasPerson(coverage: Float) = coverage >= MIN_COVERAGE
+
     /**
-     * Fracción de la imagen ocupada por personas en un fotograma de la vista previa (ya en
-     * vertical). Para el aviso en vivo "Luz natural" / "Se necesita una persona".
+     * ¿Hay una persona en este fotograma de la vista previa (ya en vertical)? Para el aviso en vivo
+     * "Luz natural" / "Se necesita una persona". Reduce el fotograma y cuenta fuera del hilo principal.
      */
-    suspend fun personCoverage(preview: Bitmap): Float {
-        val mask = segmenter.process(InputImage.fromBitmap(preview, 0)).await()
-        val fb = mask.buffer.order(ByteOrder.nativeOrder()).asFloatBuffer()
-        var n = 0
-        var total = 0
-        while (fb.hasRemaining()) { if (fb.get() > 0.5f) n++; total++ }
-        return if (total == 0) 0f else n.toFloat() / total
+    suspend fun detectPerson(preview: Bitmap): Boolean {
+        val small = withContext(Dispatchers.Default) {
+            val s = 256f / max(preview.width, preview.height)
+            Bitmap.createScaledBitmap(preview, (preview.width * s).toInt().coerceAtLeast(1), (preview.height * s).toInt().coerceAtLeast(1), true)
+        }
+        try {
+            val mask = segmenter.process(InputImage.fromBitmap(small, 0)).await()
+            return withContext(Dispatchers.Default) {
+                val fb = mask.buffer.order(ByteOrder.nativeOrder()).asFloatBuffer()
+                val a = FloatArray(fb.remaining())
+                fb.get(a)
+                hasPerson(coverage(a))
+            }
+        } finally {
+            if (small !== preview) small.recycle()
+        }
     }
 
     private val segmenter by lazy {
@@ -207,8 +229,7 @@ object Portrait {
         val upright = FloatArray(mw * mh)
         fb.get(upright)
         small.recycle()
-        val coverage = upright.count { it > 0.5f }.toFloat() / upright.size
-        if (coverage < 0.03f) return false
+        if (!hasPerson(coverage(upright))) return false
         // Volver a la orientación del sensor.
         val (sw, sh, sensor) = rotateMask(upright, mw, mh, (360 - rotation) % 360)
         NativeEngine.bokeh(bmp, sensor, sw, sh, strength, lighting.ordinal)

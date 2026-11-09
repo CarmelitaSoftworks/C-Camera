@@ -147,60 +147,89 @@ object ExifWriter {
         return byteArrayOf(0xFF.toByte(), 0xE1.toByte(), (len shr 8).toByte(), len.toByte()) + payload
     }
 
+    /** Resultado de [stripGps]. */
+    enum class GpsStrip {
+        /** No había ubicación: se puede compartir tal cual. */
+        NONE,
+        /** Había ubicación y se borró. */
+        STRIPPED,
+        /** No se pudo comprobar (estructura inesperada): NO compartir, podría llevar ubicación. */
+        FAILED,
+    }
+
     /**
      * Quita la ubicación de un JPEG (modifica [jpeg] en su sitio, sin cambiar su tamaño: así no se
      * toca lo que va detrás, como el mapa Ultra HDR o el vídeo de la Foto en vivo).
-     * Borra los datos del GPS IFD y lo deja vacío. Devuelve true si había ubicación.
+     * Borra los datos del GPS IFD y lo deja vacío. Ante cualquier duda devuelve FAILED.
      */
-    fun stripGps(jpeg: ByteArray): Boolean {
+    fun stripGps(jpeg: ByteArray): GpsStrip {
         fun u8(i: Int) = jpeg[i].toInt() and 0xFF
-        if (jpeg.size < 4 || u8(0) != 0xFF || u8(1) != 0xD8) return false
+        if (jpeg.size < 4 || u8(0) != 0xFF || u8(1) != 0xD8) return GpsStrip.FAILED
         var i = 2
-        while (i + 4 <= jpeg.size && u8(i) == 0xFF) {
-            val marker = u8(i + 1)
-            if (marker == 0xDA || marker == 0xD9) break
-            val len = (u8(i + 2) shl 8) or u8(i + 3)
-            if (len < 2) break
-            if (marker == 0xE1 && i + 10 <= jpeg.size && String(jpeg, i + 4, 6, Charsets.ISO_8859_1) == "Exif\u0000\u0000") {
-                return stripGpsInTiff(jpeg, i + 10, minOf(jpeg.size, i + 2 + len))
+        var result = GpsStrip.NONE
+        while (true) {
+            if (i >= jpeg.size) return GpsStrip.FAILED            // sin SOS: JPEG cortado
+            if (u8(i) != 0xFF) return GpsStrip.FAILED             // estructura inesperada
+            while (i < jpeg.size && u8(i) == 0xFF) i++            // bytes de relleno 0xFF
+            if (i >= jpeg.size) return GpsStrip.FAILED
+            val marker = u8(i)
+            i++
+            if (marker == 0xDA || marker == 0xD9) return result   // empieza la imagen: no hay más metadatos
+            if (marker == 0x01 || marker in 0xD0..0xD7) continue  // marcadores sin longitud
+            if (i + 2 > jpeg.size) return GpsStrip.FAILED
+            val len = (u8(i) shl 8) or u8(i + 1)
+            if (len < 2 || i + len > jpeg.size) return GpsStrip.FAILED
+            if (marker == 0xE1 && len >= 8 && String(jpeg, i + 2, 6, Charsets.ISO_8859_1) == "Exif\u0000\u0000") {
+                when (stripGpsInTiff(jpeg, i + 8, i + len)) {
+                    GpsStrip.FAILED -> return GpsStrip.FAILED
+                    GpsStrip.STRIPPED -> result = GpsStrip.STRIPPED
+                    GpsStrip.NONE -> Unit
+                }
             }
-            i += 2 + len
+            i += len
         }
-        return false
     }
 
-    private fun stripGpsInTiff(b: ByteArray, tiff: Int, end: Int): Boolean {
-        if (tiff + 8 > end) return false
-        val little = b[tiff].toInt() == 'I'.code
+    private fun stripGpsInTiff(b: ByteArray, tiff: Int, end: Int): GpsStrip {
+        if (tiff + 8 > end) return GpsStrip.FAILED
+        val little = when {
+            b[tiff].toInt() == 'I'.code && b[tiff + 1].toInt() == 'I'.code -> true
+            b[tiff].toInt() == 'M'.code && b[tiff + 1].toInt() == 'M'.code -> false
+            else -> return GpsStrip.FAILED
+        }
         fun u8(i: Int) = b[i].toInt() and 0xFF
         fun r16(i: Int) = if (little) u8(i) or (u8(i + 1) shl 8) else (u8(i) shl 8) or u8(i + 1)
-        fun r32(i: Int): Int = if (little) r16(i) or (r16(i + 2) shl 16) else (r16(i) shl 16) or r16(i + 2)
-        fun ok(i: Int, n: Int) = i >= tiff && i + n <= end
+        fun r32(i: Int): Long = (if (little) r16(i).toLong() or (r16(i + 2).toLong() shl 16)
+            else (r16(i).toLong() shl 16) or r16(i + 2).toLong()) and 0xFFFFFFFFL
+        fun ok(i: Long, n: Long) = i >= tiff && i + n <= end
         val ifd0 = tiff + r32(tiff + 4)
-        if (!ok(ifd0, 2)) return false
-        val n = r16(ifd0)
-        var gps = -1
+        if (!ok(ifd0, 2)) return GpsStrip.FAILED
+        val n = r16(ifd0.toInt())
+        if (!ok(ifd0, 2L + n * 12L)) return GpsStrip.FAILED
+        var gps = -1L
         for (k in 0 until n) {
-            val e = ifd0 + 2 + k * 12
-            if (!ok(e, 12)) return false
+            val e = ifd0.toInt() + 2 + k * 12
             if (r16(e) == 0x8825) gps = tiff + r32(e + 8)
         }
-        if (gps < 0 || !ok(gps, 2)) return false
-        val cnt = r16(gps)
+        if (gps < 0) return GpsStrip.NONE
+        if (!ok(gps, 2)) return GpsStrip.FAILED
+        val g = gps.toInt()
+        val cnt = r16(g)
         val ifdLen = 2 + cnt * 12 + 4
-        if (!ok(gps, ifdLen)) return false
+        if (!ok(gps, ifdLen.toLong())) return GpsStrip.FAILED
         for (k in 0 until cnt) {
-            val e = gps + 2 + k * 12
-            val unit = when (r16(e + 2)) { 3, 8 -> 2; 4, 9, 11 -> 4; 5, 10, 12 -> 8; else -> 1 }
-            val size = unit.toLong() * (r32(e + 4).toLong() and 0xFFFFFFFFL)
+            val e = g + 2 + k * 12
+            val unit = when (r16(e + 2)) { 3, 8 -> 2L; 4, 9, 11 -> 4L; 5, 10, 12 -> 8L; else -> 1L }
+            val size = unit * r32(e + 4)
             if (size > 4) {
                 val off = tiff + r32(e + 8)
-                if (size <= Int.MAX_VALUE && ok(off, size.toInt())) java.util.Arrays.fill(b, off, off + size.toInt(), 0)
+                if (!ok(off, size)) return GpsStrip.FAILED
+                java.util.Arrays.fill(b, off.toInt(), (off + size).toInt(), 0)
             }
         }
         // IFD vacío: 0 entradas y "siguiente IFD" = 0.
-        java.util.Arrays.fill(b, gps, gps + ifdLen, 0)
-        return cnt > 0
+        java.util.Arrays.fill(b, g, g + ifdLen, 0)
+        return if (cnt > 0) GpsStrip.STRIPPED else GpsStrip.NONE
     }
 
     /** Inserta el EXIF justo después del SOI (quitando un APP1 Exif previo si lo hubiera). */

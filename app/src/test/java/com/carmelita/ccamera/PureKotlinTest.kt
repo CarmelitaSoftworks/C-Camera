@@ -66,18 +66,39 @@ class PureKotlinTest {
         val withGps = ExifWriter.insert(fakeJpeg(), ExifWriter.Info(orientation = 6, make = "Test",
             gps = ExifWriter.Gps(40.4168, -3.7038, 650.0)))
         val copy = withGps.copyOf()
-        assertTrue(ExifWriter.stripGps(copy))
+        assertEquals(ExifWriter.GpsStrip.STRIPPED, ExifWriter.stripGps(copy))
         assertEquals(withGps.size, copy.size)
         // Lo que no es ubicación sigue igual (marca, cuerpo del JPEG).
         assertTrue(String(copy, Charsets.ISO_8859_1).contains("Test"))
         assertTrue(copy.copyOfRange(copy.size - 50, copy.size).contentEquals(withGps.copyOfRange(withGps.size - 50, withGps.size)))
         // Ya no hay nada que quitar.
-        assertTrue(!ExifWriter.stripGps(copy))
+        assertEquals(ExifWriter.GpsStrip.NONE, ExifWriter.stripGps(copy))
         // Sin GPS de partida: no cambia nada.
         val plain = ExifWriter.insert(fakeJpeg(), ExifWriter.Info(orientation = 1))
         val p2 = plain.copyOf()
-        assertTrue(!ExifWriter.stripGps(p2))
+        assertEquals(ExifWriter.GpsStrip.NONE, ExifWriter.stripGps(p2))
         assertTrue(p2.contentEquals(plain))
+    }
+
+    @Test
+    fun stripGpsFailsSafely() {
+        val withGps = ExifWriter.insert(fakeJpeg(), ExifWriter.Info(gps = ExifWriter.Gps(1.0, 2.0)))
+        // Bytes de relleno 0xFF antes del APP1: se siguen encontrando y borrando.
+        val padded = withGps.copyOfRange(0, 2) + byteArrayOf(0xFF.toByte(), 0xFF.toByte()) + withGps.copyOfRange(3, withGps.size)
+        assertEquals(ExifWriter.GpsStrip.STRIPPED, ExifWriter.stripGps(padded))
+        // Puntero GPS fuera del segmento: no se puede comprobar -> FAILED (no compartir).
+        val broken = withGps.copyOf()
+        val tiff = 10
+        val ifd0 = tiff + 8
+        val n = ((broken[ifd0].toInt() and 0xFF) shl 8) or (broken[ifd0 + 1].toInt() and 0xFF)
+        for (k in 0 until n) {
+            val e = ifd0 + 2 + k * 12
+            val tag = ((broken[e].toInt() and 0xFF) shl 8) or (broken[e + 1].toInt() and 0xFF)
+            if (tag == 0x8825) { broken[e + 8] = 0x7F; broken[e + 9] = 0 }
+        }
+        assertEquals(ExifWriter.GpsStrip.FAILED, ExifWriter.stripGps(broken))
+        // No es un JPEG.
+        assertEquals(ExifWriter.GpsStrip.FAILED, ExifWriter.stripGps(ByteArray(20)))
     }
 
     @Test

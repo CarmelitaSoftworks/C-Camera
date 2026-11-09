@@ -180,11 +180,6 @@ static void testRaw(const char* outDir) {
     const uint8_t* subj = &stage[(size_t(H * 0.28 - 30) * W + size_t(W * 0.2 - 30)) * 4];
     CHECK(bgPx[0] < 3 && bgPx[1] < 3 && bgPx[2] < 3, "escenario: el fondo debería ser negro");
     CHECK(subj[0] == subj[1] && subj[1] == subj[2], "escenario mono: el sujeto debería ser gris");
-    // El desenfoque cerca del sujeto es menor que lejos (profundidad aproximada).
-    std::vector<uint8_t> far = out;
-    portraitBokeh(far.data(), W, H, W * 4, mask.data(), 256, 192, 0.06f);
-    std::printf("  retrato f/1.4: gradiente del fondo %.1f\n", localVar(far));
-    CHECK(localVar(far) <= localVar(por) + 0.5, "más apertura debería desenfocar igual o más");
 
     // Exportación Instagram 3:4 y historia
     std::vector<uint8_t> ig(1080 * 1440 * 4);
@@ -196,6 +191,52 @@ static void testRaw(const char* outDir) {
     composeStory(out.data(), W, H, W * 4, st.data(), 1080, 1920, 1080 * 4);
     writePpm(std::string(outDir) + "/story.ppm", st.data(), 1080, 1920);
     CHECK(ig[3] == 255 && st[3] == 255, "salidas RGBA opacas");
+}
+
+/**
+ * Retrato: el desenfoque crece con la distancia al sujeto. Fondo con textura uniforme y un
+ * sujeto circular en el centro; se mide cuánto detalle queda junto al sujeto y lejos de él.
+ * También compara ƒ1,4 con ƒ2,8 con las fuerzas que usa la app (Portrait.strengthFor = 0,07 / f).
+ */
+static void testPortraitDepth() {
+    std::printf("Retrato: profundidad\n");
+    const int W = 800, H = 600;
+    std::vector<uint8_t> img(size_t(W) * H * 4);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            uint8_t v = uint8_t(60 + 140 * hashf(x / 8, y / 8));   // textura de bloques de 8 px
+            uint8_t* p = &img[(size_t(y) * W + x) * 4];
+            p[0] = v; p[1] = v; p[2] = v; p[3] = 255;
+        }
+    const int mw = 200, mh = 150;
+    std::vector<float> mask(size_t(mw) * mh);
+    for (int y = 0; y < mh; y++)
+        for (int x = 0; x < mw; x++) {
+            float dx = (x - mw / 2.f) / 25.f, dy = (y - mh / 2.f) / 25.f;
+            mask[size_t(y) * mw + x] = dx * dx + dy * dy < 1 ? 1.f : 0.f;
+        }
+    // Varianza local (diferencias horizontales) en una franja horizontal a la derecha del sujeto.
+    auto band = [&](const std::vector<uint8_t>& im, int x0, int x1) {
+        double acc = 0; int c = 0;
+        for (int y = H / 2 - 10; y < H / 2 + 10; y++)
+            for (int x = x0; x < x1; x++) {
+                double d = double(im[(size_t(y) * W + x) * 4]) - im[(size_t(y) * W + x + 1) * 4];
+                acc += d * d; c++;
+            }
+        return acc / c;
+    };
+    // El sujeto tiene radio 100 px (25/200 de 800): el borde derecho está en x = 500.
+    const int nearX0 = 515, nearX1 = 545, farX0 = 740, farX1 = 790;
+    std::vector<uint8_t> f28 = img, f14 = img;
+    portraitBokeh(f28.data(), W, H, W * 4, mask.data(), mw, mh, 0.07f / 2.8f);
+    portraitBokeh(f14.data(), W, H, W * 4, mask.data(), mw, mh, 0.07f / 1.4f);
+    double orig = band(img, farX0, farX1);
+    double near28 = band(f28, nearX0, nearX1), far28 = band(f28, farX0, farX1);
+    double far14 = band(f14, farX0, farX1);
+    std::printf("  detalle original %.1f; ƒ2,8 junto al sujeto %.1f, lejos %.1f; ƒ1,4 lejos %.1f\n", orig, near28, far28, far14);
+    CHECK(near28 > far28 * 2.0, "junto al sujeto debería quedar más detalle que lejos (profundidad)");
+    CHECK(far28 < orig * 0.1, "lejos del sujeto el fondo debería desenfocarse");
+    CHECK(far14 < far28, "ƒ1,4 debería desenfocar más que ƒ2,8");
 }
 
 static void testYuv(const char* outDir) {
@@ -278,6 +319,7 @@ int main(int argc, char** argv) {
     const char* outDir = argc > 1 ? argv[1] : ".";
     testLanczos();
     testAutoBrightness();
+    testPortraitDepth();
     testYuv(outDir);
     testRaw(outDir);
     if (failures) { std::printf("%d fallos\n", failures); return 1; }

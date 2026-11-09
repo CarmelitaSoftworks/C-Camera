@@ -260,15 +260,18 @@ private fun ProParam(name: String, value: String, selected: Boolean, onClick: ()
     }
 }
 
+/** Chip de selección (Pro, apertura, iluminación). Sobre la imagen usa un fondo más oscuro. */
 @Composable
-private fun ProChip(text: String, selected: Boolean, onClick: () -> Unit) {
+internal fun ProChip(text: String, selected: Boolean, background: Color = Color(0x33FFFFFF), onClick: () -> Unit) {
     Text(
         text, color = if (selected) Color.Black else Color.White, fontSize = 13.sp,
         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-        modifier = Modifier.clip(RoundedCornerShape(50)).background(if (selected) Yellow else Color(0x33FFFFFF))
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(if (selected) Yellow else background)
             .clickable(onClick = onClick).padding(horizontal = 11.dp, vertical = 6.dp),
     )
 }
+
+private val OnImage = Color(0x99000000)
 
 /** Indicador de exposición junto al recuadro de enfoque. */
 @Composable
@@ -304,7 +307,7 @@ fun AperturePicker(current: Float, onPick: (Float) -> Unit) {
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         com.carmelita.ccamera.processing.Portrait.apertures.forEach { f ->
-            ProChipPublic("ƒ${fmtF(f)}", f == current) { onPick(f) }
+            ProChip("ƒ${fmtF(f)}", f == current, OnImage) { onPick(f) }
         }
     }
 }
@@ -316,17 +319,7 @@ fun LightingPicker(current: com.carmelita.ccamera.processing.PortraitLighting, o
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         com.carmelita.ccamera.processing.PortraitLighting.entries.forEach { l ->
-            ProChipPublic(l.label, l == current) { onPick(l) }
+            ProChip(l.label, l == current, OnImage) { onPick(l) }
         }
     }
-}
-
-@Composable
-fun ProChipPublic(text: String, selected: Boolean, onClick: () -> Unit) {
-    Text(
-        text, color = if (selected) Color.Black else Color.White, fontSize = 13.sp,
-        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-        modifier = Modifier.clip(RoundedCornerShape(50)).background(if (selected) Yellow else Color(0x99000000))
-            .clickable(onClick = onClick).padding(horizontal = 11.dp, vertical = 6.dp),
-    )
 }

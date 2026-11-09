@@ -310,6 +310,30 @@ void sharpenPlane(Plane& p, float sigma, float amount) {
     });
 }
 
+/**
+ * Textura / microcontraste: realce de frecuencias medias (radio [r] px), como el "detalle" de las
+ * cámaras de fábrica (pelo, tela, piel). Umbral [t] para no amplificar el ruido; el realce se
+ * limita para no crear halos en bordes fuertes.
+ */
+void texturePlane(Plane& p, int r, float amount, float t) {
+    if (amount <= 0 || r < 1) return;
+    Plane b = p;
+    softBlur(b, r);
+    const float lim = 4.f * t + 0.02f;
+    parallelFor(p.h, [&](int y0, int y1) {
+        for (int y = y0; y < y1; y++) {
+            float* row = p.row(y);
+            const float* br = b.row(y);
+            for (int x = 0; x < p.w; x++) {
+                float d = row[x] - br[x];
+                float ds = d > 0 ? std::max(0.f, d - t) : std::min(0.f, d + t);
+                ds = std::min(std::max(ds, -lim), lim);
+                row[x] += amount * ds;
+            }
+        }
+    });
+}
+
 /** Bilateral 5x5 (reducción de ruido espacial cuando quedan pocos frames efectivos). */
 Plane bilateral5(const Plane& p, float sigmaR) {
     Plane o(p.w, p.h);
@@ -406,6 +430,8 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
         for (size_t i = 0; i < sq.d.size(); i++) sq.d[i] = std::sqrt(std::max(pl.d[i], 0.f));
         float sqSigma = sigma / (2.f * std::sqrt(0.18f));   // d(sqrt x) = dx / (2 sqrt x) a nivel medio
         sharpenPlane(sq, sqSigma, p.sharpen * 0.8f);
+        // Textura a escala media (~1/500 del ancho del mosaico): da el aspecto "detallado".
+        texturePlane(sq, std::max(2, pw / 500), 0.45f * p.sharpen, sqSigma * 1.2f);
         for (size_t i = 0; i < sq.d.size(); i++) {
             float v = std::max(sq.d[i], 0.f);
             // Limitar el sobreimpulso a ±35 % del valor original.
@@ -519,6 +545,7 @@ void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, 
     float sigma = m.residualSigma();
     if (sigma > 1.5f / 255.f) Y = bilateral5(Y, 2.5f * sigma);
     sharpenPlane(Y, sigma, p.sharpen);
+    texturePlane(Y, std::max(2, Y.w / 1000), 0.45f * p.sharpen, sigma * 1.2f);
     int passes = sigma > 2.f / 255.f ? 2 : 1;
     Plane U = blur(m.planes[1], passes), V = blur(m.planes[2], passes);
     bool hasShort = !m.shortPlanes.empty();

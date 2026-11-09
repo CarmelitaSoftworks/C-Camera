@@ -671,7 +671,17 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         val s = _state.value
         if (s.capturing || processingCount.get() >= 2 || !controller.isOpen) return
         val rotation = controller.jpegOrientation(deviceRotation)
-        _state.update { it.copy(capturing = true, captureProgress = 0f, shutterFlash = System.nanoTime(), qr = null) }
+        // Miniatura instantánea con la vista previa (como las cámaras de fábrica); la definitiva
+        // la sustituye al terminar el revelado.
+        val instant = runCatching { previewFrameProvider?.invoke() }.getOrNull()?.let { b ->
+            val sc = 240f / maxOf(b.width, b.height)
+            Bitmap.createScaledBitmap(b, (b.width * sc).toInt().coerceAtLeast(1), (b.height * sc).toInt().coerceAtLeast(1), true)
+                .also { if (it !== b) b.recycle() }
+        }
+        _state.update {
+            it.copy(capturing = true, captureProgress = 0f, shutterFlash = System.nanoTime(), qr = null,
+                thumbnail = instant ?: it.thumbnail)
+        }
 
         viewModelScope.launch(Dispatchers.Default) {
             val t0 = System.currentTimeMillis()
@@ -680,6 +690,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             var refResult: TotalCaptureResult? = null
             var firstRaw: CapturedFrame.Raw? = null
             var kind = ""
+            var counted = false   // ¿ya se sumó esta foto a processingCount?
             try {
                 val caps = controller.caps
                 val info = controller.photoInfo ?: error("Sesión no lista")
@@ -691,6 +702,9 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 val aeIso = controller.currentExposure()?.second ?: 0
                 val autoNight = s.mode == CaptureMode.PHOTO && s.autoNight && !flashNeeded && aeIso >= AUTO_NIGHT_ISO
                 val night = s.mode == CaptureMode.NIGHT || autoNight
+                // Con buena luz bastan 4 fotogramas (menos que copiar y fusionar: foto más rápida).
+                val photoFrames = if (aeIso in 1..399) 4 else PHOTO_FRAMES
+                val nightFrames = if (autoNight) AUTO_NIGHT_FRAMES else NIGHT_FRAMES
                 if (night) _state.update { it.copy(nightCapture = true) }
                 // Estabilización digital de fotos: el fotograma más nítido de los primeros es la referencia.
                 val picker = ReferencePicker(enabled = photoStabilization(s)) { f, r -> j.add(f, r) }
@@ -706,16 +720,16 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                             kind = if (autoNight) "Noche auto" else "Noche"
                             controller.frames.setPaused(true)
                             try {
-                                val (reqs, t) = controller.nightRequests(NIGHT_FRAMES)
+                                val (reqs, t) = controller.nightRequests(nightFrames)
                                 controller.capture(reqs, 3_000 + (t ?: 0L) / 1_000_000L * 3) { f, r, i ->
-                                    picker.offer(f, r); progress((i + 1f) / NIGHT_FRAMES)
+                                    picker.offer(f, r); progress((i + 1f) / nightFrames)
                                 }
                                 picker.finish()
                             } finally { controller.frames.setPaused(false) }
                         }
                         else -> {
                             kind = when (s.mode) { CaptureMode.PORTRAIT -> "Retrato"; CaptureMode.PRO -> "Pro"; else -> "Foto" }
-                            val zsl = if (info.zsl) controller.frames.takeLatest(PHOTO_FRAMES) else emptyList()
+                            val zsl = if (info.zsl) controller.frames.takeLatest(photoFrames) else emptyList()
                             if (zsl.size >= 2) {
                                 kind += " ZSL"
                                 val shutterUs = zsl.first().timestamp / 1000
@@ -728,11 +742,14 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                                     picker.offer(f, controller.frames.result(f.timestamp)); progress((i + 1f) / (zsl.size + 1))
                                 }
                             } else {
-                                controller.capture(controller.burstRequests(PHOTO_FRAMES), 3_000) { f, r, i ->
-                                    picker.offer(f, r); progress((i + 1f) / (PHOTO_FRAMES + 1))
+                                controller.capture(controller.burstRequests(photoFrames), 3_000) { f, r, i ->
+                                    picker.offer(f, r); progress((i + 1f) / (photoFrames + 1))
                                 }
                             }
                             picker.finish()   // antes del frame corto: la referencia tiene que ir primero
+                            // El momento ya está captado: se libera el disparador mientras se toma el
+                            // frame corto del Smart HDR (la siguiente foto espera al bloqueo de la cámara).
+                            _state.update { it.copy(capturing = false) }
                             // Smart HDR: un frame subexpuesto para las altas luces.
                             if (s.smartHdr) {
                                 controller.shortExposureRequest(SHORT_RATIO)?.let { req ->
@@ -748,6 +765,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 refResult = picker.reference?.second
                 firstRaw = picker.reference?.first as? CapturedFrame.Raw
                 val count = processingCount.incrementAndGet()
+                counted = true
                 _state.update { it.copy(capturing = false, nightCapture = false, processing = count) }
 
                 val manualExp = s.mode == CaptureMode.PRO && s.pro.iso != null && s.pro.exposureNs != null
@@ -777,7 +795,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Throwable) {
                 Log.e(TAG, "Fallo en la captura", e)
                 job?.close()
-                val busy = if (_state.value.capturing) processingCount.get() else processingCount.decrementAndGet().coerceAtLeast(0)
+                val busy = if (counted) processingCount.decrementAndGet().coerceAtLeast(0) else processingCount.get()
                 _state.update {
                     it.copy(
                         capturing = false, nightCapture = false, processing = busy,
@@ -1097,6 +1115,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         private const val TAG = "CCamera"
         private const val PHOTO_FRAMES = 6
         private const val NIGHT_FRAMES = 8
+        /** Noche automática: menos fotogramas que el modo Noche (más rápida, como la de fábrica). */
+        private const val AUTO_NIGHT_FRAMES = 5
         private const val SHORT_RATIO = 6f
         private const val BURST_MAX = 50
         private const val BURST_INTERVAL_MS = 220L

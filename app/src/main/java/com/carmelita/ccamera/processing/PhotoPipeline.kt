@@ -26,6 +26,8 @@ data class DevelopParams(
     val exposure: Float = 1f,
     val ultraHdr: Boolean = true,
     val headroom: Float = 4f,
+    /** Brillo automático tras la fusión (se apaga con exposición manual en Pro). */
+    val autoBrightness: Boolean = true,
 )
 
 /**
@@ -117,7 +119,7 @@ class PhotoJob(private val caps: CameraCapabilities, private val raw: Boolean) :
         val wantGain = p.ultraHdr && Build.VERSION.SDK_INT >= 34
         val gain = NativeEngine.process(
             handle, bmp, if (raw) colorMeta() else null, lsc?.first, lsc?.second ?: 0, lsc?.third ?: 0,
-            p.exposure, p.smartHdr, p.style.ordinal, p.sharpen, wantGain, p.headroom,
+            p.exposure, p.smartHdr, p.style.ordinal, p.sharpen, wantGain, p.headroom, p.autoBrightness,
         )
         if (gain != null && Build.VERSION.SDK_INT >= 34) {
             val (gw, gh) = NativeEngine.gainMapSize(handle).let { it[0] to it[1] }

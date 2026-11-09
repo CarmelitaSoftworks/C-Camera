@@ -16,8 +16,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -38,6 +36,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FlashAuto
+import androidx.compose.material.icons.filled.LocalFlorist
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Timer10
+import androidx.compose.material.icons.filled.Timer3
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.HdrOff
@@ -50,6 +52,7 @@ import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Cameraswitch
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -58,6 +61,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -73,6 +77,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -93,6 +99,7 @@ import com.carmelita.ccamera.camera.ZoomStop
 import com.carmelita.ccamera.processing.PhotoStyle
 import kotlinx.coroutines.delay
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 val Yellow = Color(0xFFFFD60A)
 val Panel = Color(0xFF1C1C1E)
@@ -136,7 +143,8 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
         onDispose { listener.disable() }
     }
 
-    val video = state.mode == CaptureMode.VIDEO
+    val video = state.mode.isVideo
+    val photoLike = !video && state.mode != CaptureMode.PANO
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         Column(Modifier.fillMaxSize().systemBarsPadding()) {
             TopBar(state, rot, showStyles, vm, onStyles = { showStyles = !showStyles })
@@ -145,9 +153,26 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
             else Modifier.fillMaxWidth().aspectRatio(3f / 4f)
             Box(previewModifier.align(Alignment.CenterHorizontally)) {
                 Preview(vm)
+                if (photoLike) AspectOverlay(state.aspect)
+                if (state.grid) GridOverlay()
+                if (state.level) LevelOverlay()
+                if (state.mode == CaptureMode.PANO) PanoOverlay(state.panoActive, state.panoProgress, state.panoHint)
                 FocusOverlay(state.focus)
+                state.focus?.let { f ->
+                    if (state.evStep > 0f && state.mode != CaptureMode.PRO) {
+                        BoxWithConstraints(Modifier.fillMaxSize()) {
+                            val d = LocalDensity.current
+                            val x = with(d) { (f.x * constraints.maxWidth).toDp() } + 44.dp
+                            val y = with(d) { (f.y * constraints.maxHeight).toDp() } - 12.dp
+                            EvIndicator(state.ev, Modifier.offset(x.coerceAtMost(maxWidth - 64.dp), y.coerceAtLeast(0.dp)))
+                        }
+                    }
+                }
                 ShutterFlash(state.shutterFlash)
+                CountdownOverlay(state.countdown)
                 if (state.recording) RecordingTimer(state.recordStartMs, Modifier.align(Alignment.TopCenter).padding(top = 10.dp))
+                else if (state.bursting) TopPill("${state.burstCount}", Modifier.align(Alignment.TopCenter).padding(top = 10.dp))
+                else if (state.aeAfLocked) TopPill("BLOQUEO AE/AF", Modifier.align(Alignment.TopCenter).padding(top = 10.dp))
 
                 Column(
                     Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
@@ -167,6 +192,10 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
                 }
             }
 
+            if (state.mode == CaptureMode.PRO) {
+                Spacer(Modifier.height(8.dp))
+                ProPanel(state.pro, state.proCaps, vm)
+            }
             ModeSelector(state.mode, vm::setMode)
 
             Box(if (video) Modifier.fillMaxWidth().height(130.dp) else Modifier.fillMaxWidth().weight(1f)) {
@@ -177,11 +206,14 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
                 ) {
                     Thumbnail(state, rot) { vm.openViewer() }
                     ShutterButton(
-                        video = video, recording = state.recording,
+                        video = video, recording = state.recording || state.panoActive,
                         enabled = !state.capturing && state.processing < 2,
+                        burstAllowed = state.mode == CaptureMode.PHOTO || state.mode == CaptureMode.PRO,
                         onClick = vm::shutter,
+                        onBurstStart = vm::startBurst,
+                        onBurstEnd = vm::stopBurst,
                     )
-                    if (state.hasFront && !state.recording) {
+                    if (state.hasFront && !state.recording && !state.panoActive) {
                         RoundIconButton(onClick = vm::switchLens, rotation = rot) {
                             Icon(Icons.Outlined.Cameraswitch, "Cambiar cámara", tint = Color.White)
                         }
@@ -201,6 +233,7 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
             }
         }
         if (state.showInfo) InfoSheet(state, vm)
+        if (state.showSettings) SettingsSheet(state, vm)
         state.viewer?.let { PhotoViewer(it, state, vm) }
     }
 }
@@ -223,16 +256,26 @@ private fun Preview(vm: CameraViewModel) {
                     val tv = this
                     // Fotogramas pequeños para el lector de QR (se llama en el hilo principal).
                     vm.previewFrameProvider = { if (tv.isAvailable) tv.getBitmap(480, 640) else null }
+                    vm.previewBitmapProvider = { w, h -> if (tv.isAvailable) tv.getBitmap(w, h) else null }
                 }
             },
             modifier = Modifier.fillMaxSize(),
         )
         Box(
             Modifier.fillMaxSize()
-                .pointerInput(Unit) { detectTapGestures { p -> vm.focusAt(p.x / size.width, p.y / size.height) } }
                 .pointerInput(Unit) {
-                    detectTransformGestures { _, _, zoomChange, _ ->
+                    detectTapGestures(
+                        onTap = { p -> vm.focusAt(p.x / size.width, p.y / size.height) },
+                        onLongPress = { p -> vm.focusAt(p.x / size.width, p.y / size.height, lock = true) },
+                    )
+                }
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, pan, zoomChange, _ ->
                         if (zoomChange != 1f) vm.setZoom(vm.state.value.zoom * zoomChange)
+                        else if (vm.state.value.focus != null && pan.y != 0f) {
+                            // Deslizar hacia arriba sube la exposición (unos 12 pasos por la altura de la vista).
+                            vm.adjustEv(-pan.y / size.height * 12f)
+                        }
                     }
                 },
         )
@@ -250,7 +293,8 @@ private fun TopIcon(icon: ImageVector, desc: String, tint: Color, rot: Float, en
 
 @Composable
 private fun TopBar(state: CameraUiState, rot: Float, stylesOpen: Boolean, vm: CameraViewModel, onStyles: () -> Unit) {
-    val video = state.mode == CaptureMode.VIDEO
+    val video = state.mode.isVideo
+    val stills = !video && state.mode != CaptureMode.PANO
     Row(
         Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -265,11 +309,22 @@ private fun TopBar(state: CameraUiState, rot: Float, stylesOpen: Boolean, vm: Ca
                 }
                 TopIcon(icon, "Flash", tint, rot, onClick = vm::cycleFlash)
             }
-            if (!video) TopIcon(if (state.smartHdr) Icons.Filled.HdrOn else Icons.Filled.HdrOff, "Smart HDR",
+            if (stills) TopIcon(if (state.smartHdr) Icons.Filled.HdrOn else Icons.Filled.HdrOff, "Smart HDR",
                 if (state.smartHdr) Yellow else Color.White, rot, onClick = vm::toggleHdr)
+            if (stills) {
+                val timerIcon = when (state.timer) { 3 -> Icons.Filled.Timer3; 10 -> Icons.Filled.Timer10; else -> Icons.Filled.Timer }
+                TopIcon(timerIcon, "Temporizador", if (state.timer > 0) Yellow else Color.White, rot, onClick = vm::cycleTimer)
+            }
+            if (state.hasMacro && (state.mode == CaptureMode.PHOTO || state.mode == CaptureMode.PRO)) {
+                TopIcon(Icons.Filled.LocalFlorist, "Macro", if (state.macro) Yellow else Color.White, rot, onClick = vm::toggleMacro)
+            }
         }
         when {
             state.mode == CaptureMode.NIGHT -> Pill(Icons.Filled.NightsStay, "Noche")
+            state.mode == CaptureMode.SLOWMO -> Text(state.slowMoLabel?.let { "$it fps" } ?: "No disponible",
+                color = Yellow, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            state.mode == CaptureMode.TIMELAPSE -> Text("15×", color = Yellow, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            state.mode == CaptureMode.PANO -> Text("PANORÁMICA", color = Color(0xFF8E8E93), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
             video -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (state.can4k) SmallToggle(if (state.video4k) "4K" else "HD", state.video4k, vm::toggle4k)
                 if (state.can60) SmallToggle(if (state.video60) "60" else "30", state.video60, vm::toggle60)
@@ -287,7 +342,8 @@ private fun TopBar(state: CameraUiState, rot: Float, stylesOpen: Boolean, vm: Ca
                 TopIcon(if (state.livePhoto) Icons.Filled.MotionPhotosOn else Icons.Filled.MotionPhotosOff, "Foto en vivo",
                     if (state.livePhoto && state.liveActive) Yellow else Color.White, rot, onClick = vm::toggleLive)
             }
-            if (!video) TopIcon(Icons.Outlined.AutoAwesome, "Estilos fotográficos", if (stylesOpen) Yellow else Color.White, rot, onClick = onStyles)
+            if (stills) TopIcon(Icons.Outlined.AutoAwesome, "Estilos fotográficos", if (stylesOpen) Yellow else Color.White, rot, onClick = onStyles)
+            TopIcon(Icons.Outlined.Settings, "Ajustes", Color.White, rot) { vm.showSettings(true) }
             TopIcon(Icons.Outlined.Info, "Info de cámara", Color.White, rot) { vm.showInfo(true) }
         }
     }
@@ -420,31 +476,67 @@ private fun ZoomChips(zoom: Float, stops: List<ZoomStop>, onZoom: (Float) -> Uni
 
 @Composable
 private fun ModeSelector(mode: CaptureMode, onMode: (CaptureMode) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 14.dp),
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        CaptureMode.entries.forEach { m ->
-            Text(
-                m.label, color = if (m == mode) Yellow else Color.White,
-                fontSize = 14.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp,
-                modifier = Modifier.clickable { onMode(m) }.padding(horizontal = 14.dp, vertical = 4.dp),
-            )
+    // Con 8 modos no caben todos: el seleccionado se centra deslizando la fila.
+    val scroll = rememberScrollState()
+    val centers = remember { mutableStateMapOf<CaptureMode, Float>() }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val viewport = constraints.maxWidth.toFloat()
+        val side = maxWidth / 2 - 40.dp
+        val sidePx = with(LocalDensity.current) { side.toPx() }
+        LaunchedEffect(mode, centers[mode], viewport) {
+            // Las posiciones de los textos no incluyen el margen lateral de la fila.
+            val c = centers[mode] ?: return@LaunchedEffect
+            scroll.animateScrollTo((sidePx + c - viewport / 2).roundToInt().coerceIn(0, scroll.maxValue))
+        }
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(scroll).padding(vertical = 14.dp).padding(horizontal = side),
+        ) {
+            CaptureMode.entries.forEach { m ->
+                Text(
+                    m.label, color = if (m == mode) Yellow else Color.White,
+                    fontSize = 14.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp, maxLines = 1,
+                    modifier = Modifier
+                        .onGloballyPositioned { c -> centers[m] = c.positionInParent().x + c.size.width / 2f }
+                        .clickable { onMode(m) }.padding(horizontal = 12.dp, vertical = 4.dp),
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun ShutterButton(video: Boolean, recording: Boolean, enabled: Boolean, onClick: () -> Unit) {
+private fun ShutterButton(
+    video: Boolean, recording: Boolean, enabled: Boolean, burstAllowed: Boolean,
+    onClick: () -> Unit, onBurstStart: () -> Unit, onBurstEnd: () -> Unit,
+) {
     val haptic = LocalHapticFeedback.current
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
+    var pressed by remember { mutableStateOf(false) }
     val inner by animateFloatAsState(if (pressed) 0.86f else if (recording) 0.5f else 1f, label = "shutter")
     Box(
         Modifier.size(78.dp).border(4.dp, Color.White, CircleShape).padding(7.dp)
-            .clickable(interactionSource = interaction, indication = null, enabled = enabled || recording) {
-                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                onClick()
+            .pointerInput(enabled, recording, burstAllowed) {
+                var bursting = false
+                detectTapGestures(
+                    onPress = {
+                        pressed = true
+                        tryAwaitRelease()
+                        pressed = false
+                        if (bursting) { bursting = false; onBurstEnd() }
+                    },
+                    onLongPress = {
+                        if (burstAllowed && enabled) {
+                            bursting = true
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onBurstStart()
+                        }
+                    },
+                    onTap = {
+                        if (enabled || recording) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onClick()
+                        }
+                    },
+                )
             },
         contentAlignment = Alignment.Center,
     ) {

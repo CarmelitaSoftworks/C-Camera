@@ -3,6 +3,11 @@ package com.carmelita.ccamera.storage
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.DngCreator
+import android.util.Size
+import java.nio.ByteBuffer
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -33,10 +38,12 @@ object MediaSaver {
         return bos.toByteArray()
     }
 
-    private fun writeImage(context: Context, bytes: ByteArray, name: String, subdir: String, date: Date): Uri {
+    private fun writeImage(
+        context: Context, bytes: ByteArray, name: String, subdir: String, date: Date, mime: String = "image/jpeg",
+    ): Uri {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.MIME_TYPE, mime)
             put(MediaStore.Images.Media.DATE_TAKEN, date.time)
             if (Build.VERSION.SDK_INT >= 29) {
                 put(MediaStore.Images.Media.RELATIVE_PATH, subdir)
@@ -69,6 +76,34 @@ object MediaSaver {
             if (mp.size > jpeg.size) { jpeg = mp; name = "CCAM_${stamp(date)}.MP.jpg" }
         }
         return writeImage(context, jpeg, name, Environment.DIRECTORY_DCIM + "/CCamera", date)
+    }
+
+    /**
+     * RAW en DNG (el primer frame de la ráfaga, sin procesar) junto a la foto.
+     * [data] es RAW16 con [rowStride] bytes por fila; DngCreator lo quiere sin relleno.
+     */
+    fun saveDng(
+        context: Context, chars: CameraCharacteristics, result: CaptureResult,
+        data: ByteBuffer, rowStride: Int, width: Int, height: Int, exifOrientation: Int, date: Date = Date(),
+    ): Uri {
+        val dense = if (rowStride == width * 2) data.duplicate().also { it.rewind() } else {
+            val out = ByteBuffer.allocateDirect(width * height * 2)
+            val src = data.duplicate()
+            val row = ByteArray(width * 2)
+            for (y in 0 until height) {
+                src.position(y * rowStride)
+                src.get(row)
+                out.put(row)
+            }
+            out.rewind()
+            out
+        }
+        val bos = ByteArrayOutputStream(width * height * 2 + 65_536)
+        DngCreator(chars, result).use { dng ->
+            dng.setOrientation(exifOrientation)
+            dng.writeByteBuffer(bos, Size(width, height), dense, 0)
+        }
+        return writeImage(context, bos.toByteArray(), "CCAM_${stamp(date)}.dng", Environment.DIRECTORY_DCIM + "/CCamera", date, "image/x-adobe-dng")
     }
 
     /** Exportación para redes (Pictures/CCamera/Instagram). */

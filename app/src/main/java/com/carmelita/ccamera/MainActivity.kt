@@ -4,9 +4,11 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -33,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.carmelita.ccamera.ui.CameraScreen
+import com.carmelita.ccamera.ui.CameraViewModel
 
 class MainActivity : ComponentActivity() {
 
@@ -42,6 +45,9 @@ class MainActivity : ComponentActivity() {
         add(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT <= 28) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
     }.toTypedArray()
+
+    /** El mismo ViewModel que usa CameraScreen (ámbito de la actividad). */
+    private val vm: CameraViewModel by viewModels()
 
     private fun hasCamera() = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
@@ -73,4 +79,21 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /** Botones de volumen como disparador (como en el iPhone), si está activado en Ajustes. */
+    private fun volumeShutterActive(keyCode: Int): Boolean {
+        if (keyCode != KeyEvent.KEYCODE_VOLUME_DOWN && keyCode != KeyEvent.KEYCODE_VOLUME_UP) return false
+        if (!hasCamera()) return false
+        val s = vm.state.value
+        return s.volumeShutter && s.viewer == null && !s.showInfo && !s.showSettings
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (!volumeShutterActive(keyCode)) return super.onKeyDown(keyCode, event)
+        if (event.repeatCount == 0) vm.shutter()
+        return true
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean =
+        if (volumeShutterActive(keyCode)) true else super.onKeyUp(keyCode, event)
 }

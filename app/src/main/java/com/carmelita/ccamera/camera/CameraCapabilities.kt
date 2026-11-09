@@ -95,6 +95,19 @@ class CameraCapabilities private constructor(
     val lensShadingMap = chars.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_LENS_SHADING_MAP_MODES)
         ?.contains(CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON) == true
 
+    // ---- Exposición, macro y controles manuales ----
+    /** Rango de compensación de exposición en pasos (p. ej. -12..12) y tamaño del paso en EV. */
+    val evRange: Range<Int> = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: Range(0, 0)
+    val evStep: Float = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0f
+    val hasEv: Boolean = evRange.upper > evRange.lower && evStep > 0f
+    val hasMacroAf = afModes.contains(CameraMetadata.CONTROL_AF_MODE_MACRO)
+    /** Distancia mínima de enfoque en dioptrías (0 = foco fijo). */
+    val minFocusDiopters: Float = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+    val manualFocus: Boolean = minFocusDiopters > 0f &&
+        caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
+    val awbModes: IntArray = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: IntArray(0)
+    val aeLockAvailable: Boolean = chars.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE) == true
+
     // ---- Zoom y lentes ----
     val logicalMultiCamera = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)
     val usesZoomRatio: Boolean = Build.VERSION.SDK_INT >= 30 && chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) != null
@@ -148,6 +161,23 @@ class CameraCapabilities private constructor(
         return ranges.any { it.upper >= fps && it.lower <= fps } && minDur <= 1_000_000_000L / fps + 500_000L
     }
 
+    /**
+     * Cámara lenta: sesión de alta velocidad (120/240 fps). Devuelve tamaño y fps elegidos
+     * (prefiere 1080p a 240, luego 1080p a 120, luego 720p) o null si el teléfono no la tiene.
+     */
+    val slowMotion: Pair<Size, Int>? = run {
+        if (!caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO)) return@run null
+        val sizes = runCatching { map.highSpeedVideoSizes.toList() }.getOrDefault(emptyList())
+        fun fixedFps(s: Size): List<Int> = runCatching {
+            map.getHighSpeedVideoFpsRangesFor(s).filter { it.lower == it.upper }.map { it.upper }
+        }.getOrDefault(emptyList())
+        val ordered = sizes.sortedWith(compareByDescending<Size> { it.width == 1920 && it.height == 1080 }
+            .thenByDescending { it.width == 1280 && it.height == 720 }
+            .thenByDescending { it.width * it.height })
+        for (fps in listOf(240, 120)) for (s in ordered) if (fps in fixedFps(s)) return@run s to fps
+        null
+    }
+
     val hevc: Boolean = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
         info.isEncoder && info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_HEVC, ignoreCase = true) }
     }
@@ -191,6 +221,10 @@ class CameraCapabilities private constructor(
             "HEVC" to yes(hevc),
             "Vídeo HDR (HLG 10 bits)" to yes(hdrVideo),
             "Ultra HDR (fotos)" to yes(ultraHdr),
+            "Cámara lenta" to (slowMotion?.let { "${it.first.width}×${it.first.height} a ${it.second} fps" } ?: "No"),
+            "Enfoque macro" to yes(hasMacroAf),
+            "Enfoque manual" to yes(manualFocus),
+            "Compensación de exposición" to if (hasEv) "±%.1f EV".format(evRange.upper * evStep) else "No",
             "Detección de caras" to yes(faceDetection),
             "Mapa de sombreado de lente" to yes(lensShadingMap),
         )

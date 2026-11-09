@@ -21,6 +21,12 @@ mensajes al usuario **en español**.
 - `./gradlew assembleDebug`, `assembleRelease` y `testDebugUnitTest` compilan y pasan (9-nov-2026,
   en local con SDK 35, build-tools 35, cmake 3.22.1 y el NDK por defecto de AGP 8.9.1).
 - El motor C++ y el Kotlin puro (EXIF, Motion Photo, QR) sí están probados.
+- **Sin compilar todavía** (el usuario pidió compilar sólo cuando lo diga): modos Time-lapse,
+  Cámara lenta (sesión de alta velocidad), Panorámica (`PanoramaStitcher`, con prueba JVM) y Pro
+  (ISO, velocidad, balance de blancos, foco); temporizador, ráfaga manteniendo el disparador,
+  bloqueo AE/AF con pulsación larga, compensación de exposición deslizando, macro, cuadrícula,
+  nivel, proporción 4:3/16:9/1:1, espejo frontal, ubicación en EXIF (GPS IFD), DNG opcional,
+  botones de volumen y pantalla de Ajustes. Al compilar, esperar algún error de tipos.
 - No se ha probado en ningún teléfono.
 
 ### Siguiente paso
@@ -65,7 +71,10 @@ app/src/main/java/com/carmelita/ccamera/
   storage/                        MediaSaver, ExifWriter y MotionPhotoWriter (estos dos Kotlin puro)
   share/InstagramExporter.kt      1080x1440/1350/1080/1920, conserva Ultra HDR, intent a Instagram
   qr/                             QrContent (intérprete, Kotlin puro) y QrScanner/QrActions (ML Kit)
-  ui/                             Compose: CameraScreen, ViewerScreen (visor + Instagram + Info), ViewModel
+  ui/                             Compose: CameraScreen, ViewerScreen (visor + Instagram + Info), ViewModel,
+                                  SettingsSheet (Ajustes), Overlays (cuadrícula, nivel, Pro, panorámica...)
+  processing/PanoramaStitcher.kt  panorámica con fotogramas de la vista previa (Kotlin puro)
+  processing/ImageOps.kt          recorte de proporción y espejo conservando el mapa de ganancia
 ```
 
 ## Decisiones y detalles a no romper

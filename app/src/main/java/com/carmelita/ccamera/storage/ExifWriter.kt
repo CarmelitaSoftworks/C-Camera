@@ -21,7 +21,11 @@ object ExifWriter {
         val focalLengthMm: Float? = null,
         val aperture: Float? = null,
         val description: String = "",
+        val gps: Gps? = null,
     )
+
+    /** Ubicación (grados decimales, altitud en metros sobre el nivel del mar). */
+    data class Gps(val latitude: Double, val longitude: Double, val altitudeM: Double? = null)
 
     fun degreesToOrientation(deg: Int) = when ((deg % 360 + 360) % 360) {
         90 -> 6
@@ -45,6 +49,33 @@ object ExifWriter {
     private fun short(tag: Int, v: Int) = Entry(tag, 3, 1, byteArrayOf((v shr 8).toByte(), v.toByte(), 0, 0))
     private fun long(tag: Int, v: Int) = Entry(tag, 4, 1, be32(v))
     private fun rational(tag: Int, num: Long, den: Long) = Entry(tag, 5, 1, be32(num.toInt()) + be32(den.toInt()))
+    private fun rationals(tag: Int, vararg v: Pair<Long, Long>) =
+        Entry(tag, 5, v.size, v.fold(ByteArray(0)) { acc, (n, d) -> acc + be32(n.toInt()) + be32(d.toInt()) })
+
+    /** Grados decimales -> grados, minutos, segundos (segundos con 2 decimales). */
+    private fun dms(deg: Double): Array<Pair<Long, Long>> {
+        val a = kotlin.math.abs(deg)
+        val d = a.toLong()
+        val mFull = (a - d) * 60.0
+        val m = mFull.toLong()
+        val sec = ((mFull - m) * 60.0 * 100.0).let { kotlin.math.round(it).toLong() }
+        return arrayOf(d to 1L, m to 1L, sec to 100L)
+    }
+
+    private fun gpsEntries(g: Gps): List<Entry> {
+        val out = mutableListOf(
+            Entry(0x0000, 1, 4, byteArrayOf(2, 2, 0, 0)),                          // GPSVersionID
+            ascii(0x0001, if (g.latitude >= 0) "N" else "S"),
+            rationals(0x0002, *dms(g.latitude)),
+            ascii(0x0003, if (g.longitude >= 0) "E" else "W"),
+            rationals(0x0004, *dms(g.longitude)),
+        )
+        g.altitudeM?.let { alt ->
+            out += Entry(0x0005, 1, 1, byteArrayOf(if (alt < 0) 1 else 0, 0, 0, 0))   // AltitudeRef
+            out += rational(0x0006, kotlin.math.round(kotlin.math.abs(alt) * 100).toLong(), 100)
+        }
+        return out
+    }
 
     private fun be32(v: Int) = byteArrayOf((v shr 24).toByte(), (v shr 16).toByte(), (v shr 8).toByte(), v.toByte())
     private fun be16(v: Int) = byteArrayOf((v shr 8).toByte(), v.toByte())
@@ -93,18 +124,24 @@ object ExifWriter {
         if (info.software.isNotEmpty()) ifd0 += ascii(0x0131, info.software)
         if (info.dateTime.isNotEmpty()) ifd0 += ascii(0x0132, info.dateTime)
         if (info.description.isNotEmpty()) ifd0 += ascii(0x010E, info.description)
-        // Puntero al Exif IFD: se calcula después de conocer el tamaño del IFD0.
-        val ifd0WithPtr = ifd0 + long(0x8769, 0)
-        val ifd0Size = ifd(ifd0WithPtr, 8, 0).size
+        // Punteros al Exif IFD (y al GPS IFD): se calculan después de conocer el tamaño del IFD0
+        // (que no depende del valor de los punteros).
+        val gps = info.gps?.let { gpsEntries(it) }
+        fun ifd0With(exifPtr: Int, gpsPtr: Int) =
+            ifd0 + long(0x8769, exifPtr) + (if (gps != null) listOf(long(0x8825, gpsPtr)) else emptyList())
+        val ifd0Size = ifd(ifd0With(0, 0), 8, 0).size
         val exifOffset = 8 + ifd0Size
-        val ifd0Bytes = ifd(ifd0 + long(0x8769, exifOffset), 8, 0)
         val exifBytes = ifd(exif, exifOffset, 0)
+        val gpsOffset = exifOffset + exifBytes.size
+        val ifd0Bytes = ifd(ifd0With(exifOffset, gpsOffset), 8, 0)
+        val gpsBytes = if (gps != null) ifd(gps, gpsOffset, 0) else ByteArray(0)
 
         val tiff = ByteArrayOutputStream()
         tiff.write(byteArrayOf('M'.code.toByte(), 'M'.code.toByte(), 0, 42))
         tiff.write(be32(8))
         tiff.write(ifd0Bytes)
         tiff.write(exifBytes)
+        tiff.write(gpsBytes)
         val payload = "Exif\u0000\u0000".toByteArray(Charsets.ISO_8859_1) + tiff.toByteArray()
         val len = payload.size + 2
         return byteArrayOf(0xFF.toByte(), 0xE1.toByte(), (len shr 8).toByte(), len.toByte()) + payload

@@ -172,7 +172,8 @@ Java_com_carmelita_ccamera_processing_NativeEngine_outputSize(JNIEnv* env, jobje
 JNIEXPORT jbyteArray JNICALL
 Java_com_carmelita_ccamera_processing_NativeEngine_process(
         JNIEnv* env, jobject, jlong h, jobject bitmap, jfloatArray meta, jfloatArray lscArr, jint lscW, jint lscH,
-        jfloat exposure, jboolean smartHdr, jint style, jfloat sharpen, jboolean wantGainMap, jfloat headroom) {
+        jfloat exposure, jboolean smartHdr, jint style, jfloat sharpen, jboolean wantGainMap, jfloat headroom,
+        jboolean autoBrightness) {
     Session* s = S(h);
     std::lock_guard<std::mutex> lock(s->mu);
     if (!s->merger) { throwJava(env, "No hay frames"); return nullptr; }
@@ -203,6 +204,7 @@ Java_com_carmelita_ccamera_processing_NativeEngine_process(
     p.sharpen = sharpen;
     p.gainMap = wantGainMap;
     p.hdrHeadroom = headroom;
+    p.autoBrightness = autoBrightness;
     s->gain = GainMapOut();
     finish(m, m.kind == FrameKind::Bayer ? &md : nullptr, p, lb.data(), int(lb.info.stride), wantGainMap ? &s->gain : nullptr);
     if (!wantGainMap || s->gain.data.empty()) return nullptr;

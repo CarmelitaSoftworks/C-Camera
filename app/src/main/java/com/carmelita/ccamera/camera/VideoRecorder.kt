@@ -11,6 +11,10 @@ import android.view.Surface
 /**
  * Grabación de vídeo con MediaRecorder (H.264 o HEVC + AAC).
  * El audio sólo se activa si el permiso RECORD_AUDIO está concedido (lo comprueba quien la crea).
+ *
+ * [captureRate] distinto de [fps] cambia la velocidad de reproducción (sin audio):
+ *  - mayor (cámara lenta): se capturan 120/240 fps y el archivo se reproduce a 30 → 4x/8x más lento;
+ *  - menor (time-lapse): se guarda 1 fotograma cada 1/captureRate s y se reproduce a 30.
  */
 @SuppressLint("MissingPermission")
 class VideoRecorder(
@@ -21,6 +25,7 @@ class VideoRecorder(
     withAudio: Boolean,
     rotation: Int,
     output: ParcelFileDescriptor,
+    captureRate: Double? = null,
 ) {
     @Suppress("DEPRECATION")
     private val recorder: MediaRecorder = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(context) else MediaRecorder()
@@ -36,15 +41,21 @@ class VideoRecorder(
             else -> 10_000_000
         }
         val bitrate = ((if (hevc) base * 0.7 else base.toDouble()) * fps / 30.0).toInt()
-        if (withAudio) recorder.setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
+        val audio = withAudio && captureRate == null
+        if (audio) recorder.setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
         recorder.setVideoSource(MediaRecorder.VideoSource.SURFACE)
         recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
         recorder.setOutputFile(output.fileDescriptor)
         recorder.setVideoEncodingBitRate(bitrate)
-        recorder.setVideoFrameRate(fps)
+        if (captureRate != null) {
+            recorder.setCaptureRate(captureRate)
+            recorder.setVideoFrameRate(PLAYBACK_FPS)
+        } else {
+            recorder.setVideoFrameRate(fps)
+        }
         recorder.setVideoSize(size.width, size.height)
         recorder.setVideoEncoder(if (hevc) MediaRecorder.VideoEncoder.HEVC else MediaRecorder.VideoEncoder.H264)
-        if (withAudio) {
+        if (audio) {
             recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             recorder.setAudioSamplingRate(48_000)
             recorder.setAudioEncodingBitRate(192_000)
@@ -63,5 +74,9 @@ class VideoRecorder(
         runCatching { recorder.reset() }
         runCatching { recorder.release() }
         return ok
+    }
+
+    companion object {
+        const val PLAYBACK_FPS = 30
     }
 }

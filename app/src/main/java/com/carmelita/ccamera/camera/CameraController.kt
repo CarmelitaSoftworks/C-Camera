@@ -6,6 +6,7 @@ import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
@@ -35,6 +36,18 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 enum class FlashMode { OFF, AUTO, ON }
+
+/**
+ * Ajustes manuales del modo Pro. null = automático. La exposición manual necesita ISO y tiempo
+ * a la vez (Camera2 no tiene prioridad a la velocidad ni al ISO); la interfaz completa el que falte.
+ */
+data class ProSettings(
+    val iso: Int? = null,
+    val exposureNs: Long? = null,
+    val awbMode: Int = CameraMetadata.CONTROL_AWB_MODE_AUTO,
+    /** Enfoque manual en dioptrías (0 = infinito). */
+    val focusDiopters: Float? = null,
+)
 
 /** Cómo quedó configurada la sesión de foto tras probar lo que soporta el teléfono. */
 data class PhotoSessionInfo(
@@ -78,6 +91,13 @@ class CameraController(private val context: Context) {
     private var videoMode = false
     private var videoFps = 30
     private var torch = false
+    private var evIndex = 0
+    private var aeAfLocked = false
+    private var macro = false
+    private var pro: ProSettings? = null
+    /** Bloqueo de AE/AWB sin región (p. ej. durante una panorámica). */
+    private var exposureHold = false
+    private var highSpeed = false
 
     @Volatile var lastResult: TotalCaptureResult? = null
         private set
@@ -89,6 +109,8 @@ class CameraController(private val context: Context) {
         caps = CameraCapabilities.detect(manager, lens)
         zoom = 1f.coerceIn(caps.zoomRange.start, caps.zoomRange.endInclusive)
         focusRegions = null
+        aeAfLocked = false
+        evIndex = evIndex.coerceIn(caps.evRange.lower, caps.evRange.upper)
         device = suspendCancellableCoroutine { cont ->
             manager.openCamera(caps.id, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) { if (cont.isActive) cont.resume(camera) else camera.close() }
@@ -129,6 +151,7 @@ class CameraController(private val context: Context) {
         live?.release()
         live = null
         recordSurface = null
+        highSpeed = false
     }
 
     /**
@@ -223,6 +246,38 @@ class CameraController(private val context: Context) {
         updateRepeating()
     }
 
+    /**
+     * Cámara lenta: sesión de alta velocidad (vista previa + grabador, ambos del mismo tamaño).
+     * Sólo se usa mientras se graba; antes se ve la vista previa normal de vídeo.
+     */
+    @Suppress("DEPRECATION")
+    suspend fun startHighSpeedSession(texture: SurfaceTexture, recorder: VideoRecorder, fps: Int) {
+        val dev = device ?: error("Cámara cerrada")
+        closeOutputs()
+        videoMode = true
+        texture.setDefaultBufferSize(recorder.size.width, recorder.size.height)
+        previewSurface?.release()
+        val surface = Surface(texture)
+        previewSurface = surface
+        recordSurface = recorder.surface
+        val s = suspendCancellableCoroutine<CameraCaptureSession?> { cont ->
+            try {
+                dev.createConstrainedHighSpeedCaptureSession(listOf(surface, recorder.surface), object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(s: CameraCaptureSession) { if (cont.isActive) cont.resume(s) }
+                    override fun onConfigureFailed(s: CameraCaptureSession) { if (cont.isActive) cont.resume(null) }
+                }, handler)
+            } catch (e: Exception) {
+                Log.w(TAG, "createConstrainedHighSpeedCaptureSession", e)
+                if (cont.isActive) cont.resume(null)
+            }
+        } ?: error("La cámara no admite cámara lenta en esta configuración")
+        session = s
+        photoInfo = null
+        highSpeed = true
+        videoFps = fps
+        updateRepeating()
+    }
+
     // ---------------- Petición continua ----------------
 
     private val repeatingCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -236,6 +291,19 @@ class CameraController(private val context: Context) {
         val s = session ?: return
         val dev = device ?: return
         val surface = previewSurface ?: return
+        if (highSpeed && s is CameraConstrainedHighSpeedCaptureSession) {
+            // En alta velocidad sólo se admiten unos pocos controles: modo, fps, zoom y regiones.
+            val b = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+            b.addTarget(surface)
+            recordSurface?.let { b.addTarget(it) }
+            b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(videoFps, videoFps))
+            if (caps.usesZoomRatio && Build.VERSION.SDK_INT >= 30) b.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom)
+            else b.set(CaptureRequest.SCALER_CROP_REGION, cropRect())
+            runCatching { s.setRepeatingBurst(s.createHighSpeedRequestList(b.build()), repeatingCallback, handler) }
+                .onFailure { Log.w(TAG, "setRepeatingBurst (alta velocidad)", it) }
+            return
+        }
         val b = dev.createCaptureRequest(if (videoMode) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW)
         b.addTarget(surface)
         recordSurface?.let { b.addTarget(it) }
@@ -270,23 +338,47 @@ class CameraController(private val context: Context) {
 
     private fun apply3A(b: CaptureRequest.Builder, @Suppress("UNUSED_PARAMETER") captureFlash: Boolean) {
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-        b.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+        val p = pro
+        val awb = p?.awbMode?.takeIf { caps.awbModes.contains(it) } ?: CameraMetadata.CONTROL_AWB_MODE_AUTO
+        b.set(CaptureRequest.CONTROL_AWB_MODE, awb)
         // Con flash activado, la vista previa también usa el modo de AE con flash (como Camera2Basic):
         // así la precaptura mide bien. El flash sólo se dispara en capturas fijas.
         val aeMode = when {
-            !caps.hasFlash || videoMode -> CameraMetadata.CONTROL_AE_MODE_ON
+            !caps.hasFlash || videoMode || p != null -> CameraMetadata.CONTROL_AE_MODE_ON
             flashMode == FlashMode.ON -> CameraMetadata.CONTROL_AE_MODE_ON_ALWAYS_FLASH
             flashMode == FlashMode.AUTO -> CameraMetadata.CONTROL_AE_MODE_ON_AUTO_FLASH
             else -> CameraMetadata.CONTROL_AE_MODE_ON
         }
         b.set(CaptureRequest.CONTROL_AE_MODE, aeMode)
+        val manualExp = p?.iso != null && p.exposureNs != null && caps.manualSensor
+        if (manualExp && p != null) {
+            val er = caps.exposureRange
+            val ir = caps.isoRange
+            val t = p.exposureNs!!.let { if (er != null) it.coerceIn(er.lower, er.upper) else it }
+            val iso = p.iso!!.let { if (ir != null) it.coerceIn(ir.lower, ir.upper) else it }
+            b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, t)
+            b.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+            b.set(CaptureRequest.SENSOR_FRAME_DURATION, max(t, 33_333_333L))
+        } else {
+            if (caps.hasEv) b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evIndex.coerceIn(caps.evRange.lower, caps.evRange.upper))
+            if ((aeAfLocked || exposureHold) && caps.aeLockAvailable) b.set(CaptureRequest.CONTROL_AE_LOCK, true)
+        }
+        if (exposureHold) b.set(CaptureRequest.CONTROL_AWB_LOCK, true)
         if (caps.ois) b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
         if (caps.faceDetection) b.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE)
         val regions = focusRegions
-        if (regions != null && caps.hasAutofocus) {
+        val manualFocus = p?.focusDiopters
+        if (manualFocus != null && caps.manualFocus) {
+            b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+            b.set(CaptureRequest.LENS_FOCUS_DISTANCE, manualFocus.coerceIn(0f, caps.minFocusDiopters))
+            if (regions != null && caps.maxAeRegions > 0 && !manualExp) b.set(CaptureRequest.CONTROL_AE_REGIONS, regions)
+        } else if (regions != null && caps.hasAutofocus) {
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
             if (caps.maxAfRegions > 0) b.set(CaptureRequest.CONTROL_AF_REGIONS, regions)
             if (caps.maxAeRegions > 0) b.set(CaptureRequest.CONTROL_AE_REGIONS, regions)
+        } else if (macro && !videoMode && caps.hasMacroAf) {
+            b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_MACRO)
         } else if (videoMode && caps.afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)) {
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
         } else if (caps.hasContinuousAf) {
@@ -316,8 +408,26 @@ class CameraController(private val context: Context) {
 
     fun setTorch(on: Boolean) { torch = on; updateRepeating() }
 
-    /** Enfoque/medición en un punto de la vista previa (normalizado 0..1, vista en vertical). */
-    fun focusAt(nx: Float, ny: Float) {
+    /** Compensación de exposición en pasos del sensor (ver caps.evStep). */
+    fun setExposureCompensation(index: Int) {
+        if (!isOpen) return
+        evIndex = index.coerceIn(caps.evRange.lower, caps.evRange.upper)
+        updateRepeating()
+    }
+
+    fun setMacro(on: Boolean) { macro = on; updateRepeating() }
+
+    /** Ajustes manuales (modo Pro); null vuelve a automático. */
+    fun setPro(p: ProSettings?) { pro = p; updateRepeating() }
+
+    /** Bloquea AE y balance de blancos sin región (panorámica: que no cambie el brillo entre franjas). */
+    fun setExposureHold(on: Boolean) { exposureHold = on; updateRepeating() }
+
+    /**
+     * Enfoque/medición en un punto de la vista previa (normalizado 0..1, vista en vertical).
+     * Con [lock] = true se bloquean AE y AF ahí (pulsación larga, como en el iPhone).
+     */
+    fun focusAt(nx: Float, ny: Float, lock: Boolean = false) {
         val s = session ?: return
         val dev = device ?: return
         val surface = previewSurface ?: return
@@ -338,6 +448,7 @@ class CameraController(private val context: Context) {
             (cx + half).coerceIn(area.left + 1, area.right), (cy + half).coerceIn(area.top + 1, area.bottom),
         )
         focusRegions = arrayOf(MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX - 1))
+        aeAfLocked = false
         runCatching {
             val trigger = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 addTarget(surface); apply3A(this, false)
@@ -346,11 +457,16 @@ class CameraController(private val context: Context) {
             s.capture(trigger.build(), null, handler)
         }
         updateRepeating()
+        if (lock) {
+            // El AE converge en la región antes de bloquearse.
+            handler.postDelayed({ aeAfLocked = true; updateRepeating() }, 600)
+        }
     }
 
     fun resetFocus() {
-        if (focusRegions == null) return
+        if (focusRegions == null && !aeAfLocked) return
         focusRegions = null
+        aeAfLocked = false
         updateRepeating()
     }
 

@@ -38,6 +38,30 @@ class PureKotlinTest {
     }
 
     @Test
+    fun exifWithGps() {
+        val info = ExifWriter.Info(orientation = 1, dateTime = "2026:11:09 00:00:00",
+            gps = ExifWriter.Gps(-33.4489, -70.6693, 570.0))
+        val app1 = ExifWriter.app1(info)
+        val tiffStart = 10   // FF E1 + longitud (2) + "Exif\0\0"
+        fun u16(i: Int) = ((app1[i].toInt() and 0xFF) shl 8) or (app1[i + 1].toInt() and 0xFF)
+        fun u32(i: Int) = (u16(i) shl 16) or u16(i + 2)
+        // IFD0: buscar el puntero al GPS IFD (0x8825).
+        val ifd0 = tiffStart + u32(tiffStart + 4)
+        val n = u16(ifd0)
+        val gpsPtr = (0 until n).map { ifd0 + 2 + it * 12 }.firstOrNull { u16(it) == 0x8825 }?.let { u32(it + 8) }
+        assertTrue("falta el puntero GPS", gpsPtr != null)
+        val gps = tiffStart + gpsPtr!!
+        val tags = (0 until u16(gps)).map { u16(gps + 2 + it * 12) }
+        assertEquals(listOf(0, 1, 2, 3, 4, 5, 6), tags)
+        // Latitud sur y longitud oeste.
+        assertEquals('S'.code, app1[gps + 2 + 1 * 12 + 8].toInt())
+        assertEquals('W'.code, app1[gps + 2 + 3 * 12 + 8].toInt())
+        // 33° de latitud (primer racional).
+        val latOff = tiffStart + u32(gps + 2 + 2 * 12 + 8)
+        assertEquals(33, u32(latOff)); assertEquals(1, u32(latOff + 4))
+    }
+
+    @Test
     fun motionPhotoFromPlainJpeg() {
         val jpeg = fakeJpeg()
         val mp4 = ByteArray(5000) { (it % 251).toByte() }

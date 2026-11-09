@@ -132,8 +132,9 @@ class CameraController(private val context: Context) {
     }
 
     /**
-     * Sesión de foto. Prueba, en orden: RAW+ZSL+vivo, RAW+ZSL, RAW, YUV+ZSL+vivo, YUV+ZSL, YUV.
-     * Así cada teléfono acaba con lo mejor que realmente soporta.
+     * Sesión de foto. Prueba, en orden: RAW+ZSL+vivo, RAW+ZSL, YUV+ZSL+vivo, YUV+ZSL, RAW, YUV.
+     * El ZSL (cero retardo) va antes que el RAW sin ZSL: sin ZSL la ráfaga empieza después de
+     * pulsar y la foto sale de otro momento (se nota mucho con niños y mascotas).
      */
     suspend fun startPhotoSession(texture: SurfaceTexture, wantLive: Boolean, maxPixels: Long): PhotoSessionInfo {
         val dev = device ?: error("Cámara cerrada")
@@ -148,16 +149,17 @@ class CameraController(private val context: Context) {
         data class Attempt(val raw: Boolean, val size: Size, val zsl: Boolean, val live: Boolean)
         val attempts = mutableListOf<Attempt>()
         val rawSize = caps.rawSize
-        if (caps.supportsRaw && rawSize != null && rawSize.width.toLong() * rawSize.height <= maxPixels * 13 / 10) {
-            val zslRaw = caps.canStream(ImageFormat.RAW_SENSOR, rawSize)
-            if (zslRaw && wantLive) attempts += Attempt(true, rawSize, true, true)
-            if (zslRaw) attempts += Attempt(true, rawSize, true, false)
-            attempts += Attempt(true, rawSize, false, false)
+        val rawOk = caps.supportsRaw && rawSize != null && rawSize.width.toLong() * rawSize.height <= maxPixels * 13 / 10
+        if (rawOk && rawSize != null && caps.canStream(ImageFormat.RAW_SENSOR, rawSize)) {
+            if (wantLive) attempts += Attempt(true, rawSize, true, true)
+            attempts += Attempt(true, rawSize, true, false)
         }
         val yuv = caps.yuvSize(maxPixels)
-        val zslYuv = caps.canStream(ImageFormat.YUV_420_888, yuv)
-        if (zslYuv && wantLive) attempts += Attempt(false, yuv, true, true)
-        if (zslYuv) attempts += Attempt(false, yuv, true, false)
+        if (caps.canStream(ImageFormat.YUV_420_888, yuv)) {
+            if (wantLive) attempts += Attempt(false, yuv, true, true)
+            attempts += Attempt(false, yuv, true, false)
+        }
+        if (rawOk && rawSize != null) attempts += Attempt(true, rawSize, false, false)
         attempts += Attempt(false, yuv, false, false)
 
         for (a in attempts) {

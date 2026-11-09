@@ -4,11 +4,13 @@ namespace foton {
 
 StyleParams styleParams(Style s) {
     switch (s) {
-        case Style::RichContrast: return {0.6f, 0.15f, 0.2f};
-        case Style::Vibrant: return {0.1f, 0.f, 0.5f};
-        case Style::Warm: return {0.f, 0.6f, 0.15f};
-        case Style::Cool: return {0.f, -0.6f, 0.15f};
-        default: return {0.f, 0.f, 0.15f};
+        // Calibrado contra la vista previa del ISP: la versión anterior salía ~35 % menos
+        // saturada, con blancos grises y algo fría.
+        case Style::RichContrast: return {0.6f, 0.2f, 0.45f};
+        case Style::Vibrant: return {0.15f, 0.1f, 0.75f};
+        case Style::Warm: return {0.f, 0.7f, 0.4f};
+        case Style::Cool: return {0.f, -0.5f, 0.4f};
+        default: return {0.f, 0.12f, 0.4f};
     }
 }
 
@@ -27,7 +29,7 @@ struct Renderer {
         StyleParams p = styleParams(s);
         warmR = 1.f + 0.06f * p.warmth;
         warmB = 1.f - 0.06f * p.warmth;
-        contrast = 0.3f + 0.4f * p.tone;
+        contrast = 0.42f + 0.4f * p.tone;
         vib = p.vibrance;
     }
     static float curve(float s, float c) {
@@ -37,8 +39,12 @@ struct Renderer {
     /** rgb lineal (ya con ganancia) -> sRGB 0..1 */
     void sdr(float r, float g, float b, float* o) const {
         r *= warmR; b *= warmB;
-        r = std::max(r, 0.f); g = std::max(g, 0.f); b = std::max(b, 0.f);
-        const float knee = 0.8f;
+        // Punto negro: el ISP del teléfono deja los negros en negro; sin esto las sombras salen lavadas.
+        const float black = 0.0035f;
+        r = std::max(r - black, 0.f) * (1.f + black);
+        g = std::max(g - black, 0.f) * (1.f + black);
+        b = std::max(b - black, 0.f) * (1.f + black);
+        const float knee = 0.88f;
         float m = std::max(r, std::max(g, b));
         if (m > knee) {
             // Hombro suave: llega a ~95 % del blanco hacia 4x el blanco (con gradación en las luces).
@@ -55,9 +61,10 @@ struct Renderer {
         float l = 0.299f * r + 0.587f * g + 0.114f * b;
         float mx = std::max(r, std::max(g, b)), mn = std::min(r, std::min(g, b));
         float sat = mx - mn;
-        float fac = 1.f + vib * (1.f - sat);
+        // Saturación global moderada + vibrancia (más en colores apagados que en los ya intensos).
+        float fac = 1.f + vib * (0.35f + 0.65f * (1.f - sat));
         bool skin = r >= g && g >= b && sat > 0.05f && sat < 0.6f && (g - b) > 0.25f * (r - b);
-        if (skin) fac = 1.f + (fac - 1.f) * 0.4f;
+        if (skin) fac = 1.f + (fac - 1.f) * 0.55f;
         o[0] = clamp01(l + (r - l) * fac);
         o[1] = clamp01(l + (g - l) * fac);
         o[2] = clamp01(l + (b - l) * fac);
@@ -130,7 +137,12 @@ Plane fuseGain(const Plane& lum, const std::vector<float>& exposures, float loca
         // Mezcla local/global (global = 1) para evitar halos; la compresión de luces se aplica
         // con más fuerza que el levantamiento de sombras (las sombras levantadas de más se ven planas).
         float lg = std::log(local);
-        g.d[i] = std::exp(lg * (lg < 0 ? std::min(1.f, localMix + 0.25f) : localMix));
+        // Compresión de luces según lo brillante que sea la zona: los blancos normales (camisa,
+        // pared) casi no se tocan y quedan blancos; ventanas y cielos (por encima del blanco)
+        // se comprimen con fuerza para conservar textura.
+        float strength = localMix;
+        if (lg < 0) strength = localMix + (1.f - localMix) * smoothstep(0.7f, 2.0f, lum.d[i]);
+        g.d[i] = std::exp(lg * strength);
     }
     return g;
 }

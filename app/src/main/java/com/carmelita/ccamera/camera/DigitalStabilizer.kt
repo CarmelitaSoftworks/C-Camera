@@ -124,6 +124,9 @@ class DigitalStabilizer(
     private val quad: FloatBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
         .apply { put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)); rewind() }
     @Volatile private var released = false
+    /** Fotogramas dibujados en la vista previa (para comprobar que arrancó bien). */
+    @Volatile var previewFrames = 0
+        private set
 
     val available get() = gyro.available
 
@@ -156,12 +159,13 @@ class DigitalStabilizer(
     fun addOutput(surface: Surface, w: Int, h: Int, record: Boolean): Boolean {
         var ok = false
         runOnGl {
-            // La superficie puede tardar un instante en quedar libre de la sesión anterior.
+            // La superficie puede tardar en quedar libre de la sesión anterior (sobre todo viniendo
+            // del modo foto, donde la tenía la cámara): hasta ~1,5 s.
             var egl = EGL14.EGL_NO_SURFACE
-            for (attempt in 0 until 10) {
+            for (attempt in 0 until 30) {
                 egl = EGL14.eglCreateWindowSurface(display, config, surface, intArrayOf(EGL14.EGL_NONE), 0)
                 if (egl != EGL14.EGL_NO_SURFACE) break
-                Thread.sleep(40)
+                Thread.sleep(50)
             }
             if (egl != EGL14.EGL_NO_SURFACE) {
                 // Tamaño real de la superficie (la de la vista previa puede venir girada respecto al pedido).
@@ -209,7 +213,7 @@ class DigitalStabilizer(
             GLES20.glVertexAttribPointer(pos, 2, GLES20.GL_FLOAT, false, 0, quad)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             if (t.record) EGLExt.eglPresentationTimeANDROID(display, t.egl, frameNs)
-            EGL14.eglSwapBuffers(display, t.egl)
+            if (EGL14.eglSwapBuffers(display, t.egl) && !t.record) previewFrames++
         }
     }
 
@@ -256,7 +260,7 @@ class DigitalStabilizer(
         val latch = CountDownLatch(1)
         var error: Throwable? = null
         handler.post { try { block() } catch (t: Throwable) { error = t } finally { latch.countDown() } }
-        latch.await(3, TimeUnit.SECONDS)
+        latch.await(5, TimeUnit.SECONDS)
         error?.let { throw it }
     }
 

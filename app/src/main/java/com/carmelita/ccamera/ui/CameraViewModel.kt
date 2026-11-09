@@ -310,6 +310,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(liveActive = false, rawActive = false, zslActive = false, digitalStabActive = controller.digitalStabilizerActive,
                     sessionSummary = "Vídeo" + if (controller.digitalStabilizerActive) " · estabilizador C Camera" else "")
             }
+            if (controller.digitalStabilizerActive) watchStabilizer()
         } else {
             val info = controller.startPhotoSession(t, wantLive = s.livePhoto, maxPixels = maxPixels)
             _state.update {
@@ -339,6 +340,28 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
     }
+
+    /**
+     * Si el estabilizador no ha dibujado nada en ~1,2 s (la vista previa no quedó libre a tiempo),
+     * reinicia la sesión una vez: lo mismo que apagar y encender la opción a mano.
+     */
+    private fun watchStabilizer() {
+        stabWatchJob?.cancel()
+        stabWatchJob = viewModelScope.launch {
+            delay(1_200)
+            val s = _state.value
+            if (!s.mode.isVideo || s.recording || !controller.isOpen) return@launch
+            if (controller.digitalStabilizerActive && !controller.stabilizerDrawing && !stabRetried) {
+                Log.w(TAG, "El estabilizador no dibuja: se reinicia la sesión de vídeo")
+                stabRetried = true
+                reconfigure()
+            } else {
+                stabRetried = false
+            }
+        }
+    }
+    private var stabWatchJob: Job? = null
+    private var stabRetried = false
 
     /** Qué estabilización de vídeo usa la próxima sesión (llamar con camMutex tomado y la cámara abierta). */
     private fun applyVideoStabilization(s: CameraUiState) {

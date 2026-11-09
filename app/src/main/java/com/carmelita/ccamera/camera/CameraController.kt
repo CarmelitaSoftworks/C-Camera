@@ -114,6 +114,9 @@ class CameraController(private val context: Context) {
     /** ¿La última sesión de vídeo quedó con el estabilizador de C Camera? */
     val digitalStabilizerActive get() = stabilizer != null
 
+    /** ¿El estabilizador ya dibujó algo en la vista previa? (true si no hay estabilizador) */
+    val stabilizerDrawing get() = stabilizer?.let { it.previewFrames > 0 } ?: true
+
     @Volatile var lastResult: TotalCaptureResult? = null
         private set
 

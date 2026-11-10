@@ -805,24 +805,26 @@ class CameraController(private val context: Context) {
         fun afState() = lastResult?.get(CaptureResult.CONTROL_AF_STATE)
         // 1) Buscando: esperar un poco a que termine.
         val t0 = System.currentTimeMillis()
-        while (System.currentTimeMillis() - t0 < 500) {
+        while (System.currentTimeMillis() - t0 < 300) {
             val st = afState() ?: return null
             if (st != CameraMetadata.CONTROL_AF_STATE_PASSIVE_SCAN && st != CameraMetadata.CONTROL_AF_STATE_ACTIVE_SCAN) break
             delay(25)
         }
         val st = afState()
-        if (st == CameraMetadata.CONTROL_AF_STATE_PASSIVE_FOCUSED || st == CameraMetadata.CONTROL_AF_STATE_FOCUSED_LOCKED) return null
+        // Sólo se fuerza si el teléfono dice que NO consiguió enfocar (no si sigue buscando o está
+        // inactivo): forzar en cada foto añadía hasta 1,6 s al disparo.
+        if (st != CameraMetadata.CONTROL_AF_STATE_PASSIVE_UNFOCUSED) return null
         // 2) Sin foco (o inactivo): enfoque forzado y esperar el bloqueo.
         if (!afTrigger(CameraMetadata.CONTROL_AF_TRIGGER_START)) return null
         val t1 = System.currentTimeMillis()
-        while (System.currentTimeMillis() - t1 < 900) {
+        while (System.currentTimeMillis() - t1 < 600) {
             val now = afState()
             if (now == CameraMetadata.CONTROL_AF_STATE_FOCUSED_LOCKED || now == CameraMetadata.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) break
             delay(25)
         }
         val lockedAt = lastResult?.get(CaptureResult.SENSOR_TIMESTAMP) ?: 0L
         // 3) Que el anillo ZSL tenga fotogramas posteriores al bloqueo (no los de la búsqueda).
-        awaitFreshFrames(lockedAt, freshFrames, 700)
+        awaitFreshFrames(lockedAt, freshFrames, 400)
         return lockedAt
     }
 

@@ -246,6 +246,13 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     private var panoJob: Job? = null
     @Volatile private var panoStop = false
 
+    /** Fotos procesándose a la vez antes de bloquear el disparador (más con 8 GB de RAM o más). */
+    val maxProcessing: Int = run {
+        val am = app.getSystemService(android.app.ActivityManager::class.java)
+        val info = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        if (info.totalMem >= 7L shl 30) 3 else 2
+    }
+
     /** Resolución máxima según la memoria (la fusión trabaja en float en memoria nativa). */
     private val maxPixels: Long = run {
         val am = app.getSystemService(android.app.ActivityManager::class.java)
@@ -792,7 +799,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun takePhoto() {
         val s = _state.value
-        if (s.capturing || processingCount.get() >= 2 || !controller.isOpen) return
+        if (s.capturing || processingCount.get() >= maxProcessing || !controller.isOpen) return
         val rotation = controller.jpegOrientation(deviceRotation)
         // Miniatura instantánea con la vista previa (como las cámaras de fábrica); la definitiva
         // la sustituye al terminar el revelado.
@@ -833,6 +840,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 // Estabilización digital de fotos: el fotograma más nítido de los primeros es la referencia.
                 val picker = ReferencePicker(enabled = photoStabilization(s)) { f, r -> j.add(f, r) }
 
+                // Fotogramas captados que se fusionan DESPUÉS de soltar la cámara (la fusión es lo más
+                // lento: hacerla dentro dejaba el disparador bloqueado hasta terminar de alinear).
+                val pending = ArrayList<Pair<CapturedFrame, TotalCaptureResult?>>()
+                var shortFrame: CapturedFrame? = null
                 camMutex.withLock {
                     // En reposo: se reanuda dentro del bloqueo (el bucle de reposo no puede volver a
                     // pausar entre medias) y se espera a tener los fotogramas ZSL de la foto.
@@ -877,15 +888,12 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                                     val file = File(getApplication<Application>().cacheDir, "live_${System.currentTimeMillis()}.mp4")
                                     liveClip = async(Dispatchers.IO) { runCatching { lr.export(shutterUs, file, rotation) }.getOrNull() }
                                 }
-                                zsl.forEachIndexed { i, f ->
-                                    picker.offer(f, controller.frames.result(f.timestamp)); progress((i + 1f) / (zsl.size + 1))
-                                }
+                                zsl.forEach { f -> pending += f to controller.frames.result(f.timestamp) }
                             } else {
                                 controller.capture(controller.burstRequests(photoFrames), 3_000) { f, r, i ->
-                                    picker.offer(f, r); progress((i + 1f) / (photoFrames + 1))
+                                    pending += f to r; progress((i + 1f) / (photoFrames + 1))
                                 }
                             }
-                            picker.finish()   // antes del frame corto: la referencia tiene que ir primero
                             } finally {
                                 // Siempre se vuelve al AF continuo (aunque la captura falle).
                                 if (focusLockedAt != null) controller.releaseFocusLock()
@@ -897,7 +905,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                             if (s.smartHdr) {
                                 controller.shortExposureRequest(SHORT_RATIO)?.let { req ->
                                     runCatching {
-                                        controller.capture(listOf(req), 2_000) { f, _, _ -> j.add(f, null, isShort = true, ratio = SHORT_RATIO) }
+                                        controller.capture(listOf(req), 2_000) { f, _, _ -> shortFrame = f }
                                     }.onFailure { Log.w(TAG, "Frame corto", it) }
                                 }
                             }
@@ -905,11 +913,17 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                 }
-                refResult = picker.reference?.second
-                firstRaw = picker.reference?.first as? CapturedFrame.Raw
                 val count = processingCount.incrementAndGet()
                 counted = true
                 _state.update { it.copy(capturing = false, nightCapture = false, processing = count) }
+                // Fusión fuera del bloqueo de la cámara: el disparador ya está libre.
+                pending.forEach { (f, r) -> picker.offer(f, r) }
+                pending.clear()
+                picker.finish()   // la referencia va primero; el frame corto, después
+                shortFrame?.let { j.add(it, null, isShort = true, ratio = SHORT_RATIO) }
+                shortFrame = null
+                refResult = picker.reference?.second
+                firstRaw = picker.reference?.first as? CapturedFrame.Raw
 
                 val manualExp = s.mode == CaptureMode.PRO && s.pro.iso != null && s.pro.exposureNs != null
                 val params = DevelopParams(

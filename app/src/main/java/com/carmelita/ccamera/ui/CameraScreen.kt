@@ -228,7 +228,7 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
                     Thumbnail(state, rot) { vm.openViewer() }
                     ShutterButton(
                         video = video, recording = state.recording || state.panoActive,
-                        enabled = !state.capturing && state.processing < 2,
+                        enabled = !state.capturing && state.processing < vm.maxProcessing,
                         burstAllowed = (state.mode == CaptureMode.PHOTO || state.mode == CaptureMode.PRO) && state.extActive == null,
                         onClick = vm::shutter,
                         onBurstStart = vm::startBurst,

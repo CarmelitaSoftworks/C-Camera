@@ -19,13 +19,17 @@ object LocationHelper {
 
     /** La ubicación más reciente de los proveedores disponibles, si tiene menos de [maxAgeMs]. */
     @Suppress("MissingPermission")
-    fun lastKnown(context: Context, maxAgeMs: Long = 10 * 60_000L): ExifWriter.Gps? {
+    fun lastKnownLocation(context: Context, maxAgeMs: Long = 10 * 60_000L): Location? {
         if (!hasPermission(context)) return null
         val lm = context.getSystemService(LocationManager::class.java) ?: return null
         val best: Location = lm.getProviders(true)
             .mapNotNull { p -> runCatching { lm.getLastKnownLocation(p) }.getOrNull() }
             .maxByOrNull { it.time } ?: return null
-        if (System.currentTimeMillis() - best.time > maxAgeMs) return null
+        return if (System.currentTimeMillis() - best.time > maxAgeMs) null else best
+    }
+
+    fun lastKnown(context: Context, maxAgeMs: Long = 10 * 60_000L): ExifWriter.Gps? {
+        val best = lastKnownLocation(context, maxAgeMs) ?: return null
         return ExifWriter.Gps(best.latitude, best.longitude, if (best.hasAltitude()) best.altitude else null)
     }
 }

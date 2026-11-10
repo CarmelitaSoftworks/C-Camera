@@ -59,6 +59,19 @@ fun SettingsSheet(state: CameraUiState, vm: CameraViewModel) {
             Toggle("Nivel", state.level, vm::toggleLevel)
             Toggle("Espejo en la cámara frontal", state.mirrorFront, vm::toggleMirror)
 
+            Section("Procesado")
+            Toggle("Procesado del teléfono (recomendado)", state.phoneProcessing, vm::togglePhoneProcessing)
+            Text(
+                if (state.extensions.isEmpty())
+                    "Este teléfono no ofrece su procesado a otras apps: se usa el motor de C Camera."
+                else
+                    "Usa el mismo procesado que la cámara de fábrica (" +
+                        state.extensions.joinToString(", ") { com.carmelita.ccamera.camera.CameraCapabilities.extensionName(it) } +
+                        ") en Foto, Noche y Retrato. Pro, Panorámica y vídeo usan el motor de C Camera. " +
+                        "Con el procesado del teléfono no se aplican los estilos, la proporción ni la ráfaga.",
+                color = Color(0xFF8E8E93), fontSize = 13.sp,
+            )
+
             Section("Fotos")
             Text("Proporción", color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(top = 6.dp))
             Row(Modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -217,7 +217,7 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
                     ShutterButton(
                         video = video, recording = state.recording || state.panoActive,
                         enabled = !state.capturing && state.processing < 2,
-                        burstAllowed = state.mode == CaptureMode.PHOTO || state.mode == CaptureMode.PRO,
+                        burstAllowed = (state.mode == CaptureMode.PHOTO || state.mode == CaptureMode.PRO) && state.extActive == null,
                         onClick = vm::shutter,
                         onBurstStart = vm::startBurst,
                         onBurstEnd = vm::stopBurst,
@@ -332,6 +332,10 @@ private fun TopBar(
             }
         }
         when {
+            state.extActive != null && !video -> Text(
+                "PROCESADO DEL TELÉFONO" + if (state.mode == CaptureMode.NIGHT) " · NOCHE" else "",
+                color = Yellow, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+            )
             state.mode == CaptureMode.NIGHT -> Pill(Icons.Filled.NightsStay, "Noche")
             state.mode == CaptureMode.PHOTO && state.lowLight -> Pill(Icons.Filled.NightsStay, "Noche auto")
             state.mode == CaptureMode.PORTRAIT -> SmallToggle("ƒ${fmtF(state.portraitF)}", apertureOpen, onAperture)

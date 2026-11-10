@@ -43,6 +43,15 @@ mensajes al usuario **en español**.
    (comprobar que Google Fotos reconoce el Motion Photo), QR, exportación a Instagram y pantalla
    *Info de cámara* (qué detectó en ese teléfono).
 
+### Procesado del teléfono (modo principal, sin compilar ni probar todavía)
+
+Por decisión del usuario, Foto/Noche/Retrato usan primero el procesado del propio teléfono
+(Camera2 Extensions: Automático/HDR, Noche, Retrato) si la cámara lo ofrece; si no, o si se
+desactiva en Ajustes ("Procesado del teléfono"), el motor de C Camera. El JPEG del fabricante se
+guarda tal cual (sin estilos, proporción, ráfaga ni Foto en vivo). Pro, Panorámica y vídeo usan
+siempre el motor propio. El APK de la cámara de fábrica (vivo) no contiene el procesado (0 .so:
+está en el firmware/HAL); sus modelos son propietarios y no se copian.
+
 ## Comandos
 
 ```bash

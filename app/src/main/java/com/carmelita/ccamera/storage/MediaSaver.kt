@@ -106,6 +106,10 @@ object MediaSaver {
         return writeImage(context, bos.toByteArray(), "CCAM_${stamp(date)}.dng", Environment.DIRECTORY_DCIM + "/CCamera", date, "image/x-adobe-dng")
     }
 
+    /** JPEG ya terminado (p. ej. el del procesado del teléfono), tal cual, en DCIM/CCamera. */
+    fun saveJpegBytes(context: Context, jpeg: ByteArray, date: Date = Date()): Uri =
+        writeImage(context, jpeg, "CCAM_${stamp(date)}.jpg", Environment.DIRECTORY_DCIM + "/CCamera", date)
+
     /** Exportación para redes (Pictures/CCamera/Instagram). */
     fun saveExport(context: Context, bmp: Bitmap, suffix: String, exif: ExifWriter.Info): Uri {
         val d = Date()

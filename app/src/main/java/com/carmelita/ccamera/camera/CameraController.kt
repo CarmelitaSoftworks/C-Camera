@@ -9,6 +9,12 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraExtensionSession
+import android.hardware.camera2.params.ExtensionSessionConfiguration
+import android.hardware.camera2.params.OutputConfiguration
+import android.location.Location
+import androidx.annotation.RequiresApi
+import java.util.concurrent.Executor
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureFailure
@@ -111,6 +117,15 @@ class CameraController(private val context: Context) {
     var digitalVideoStabilization = false
     /** Usar la estabilización electrónica del teléfono (si la tiene) cuando no se usa la de C Camera. */
     var halVideoStabilization = true
+    // ---- Procesado del teléfono (Camera2 Extensions) ----
+    private var extSession: CameraExtensionSession? = null
+    private var extReader: ImageReader? = null
+    private var extKeys: Set<CaptureRequest.Key<*>> = emptySet()
+    /** Extensión en uso (CameraExtensionCharacteristics.EXTENSION_*) o null si se usa el motor propio. */
+    var activeExtension: Int? = null
+        private set
+    private val executor = Executor { handler.post(it) }
+
     /** ¿La última sesión de vídeo quedó con el estabilizador de C Camera? */
     val digitalStabilizerActive get() = stabilizer != null
 
@@ -172,6 +187,120 @@ class CameraController(private val context: Context) {
         highSpeed = false
         stabilizer?.release()
         stabilizer = null
+        runCatching { extSession?.close() }
+        extSession = null
+        runCatching { extReader?.close() }
+        extReader = null
+        activeExtension = null
+    }
+
+    /**
+     * Sesión de foto con el procesado del propio teléfono (Camera2 Extensions: el fabricante hace
+     * la fusión, el HDR, la noche o el retrato con su ISP y sus algoritmos). Vista previa 4:3 + JPEG
+     * a la máxima resolución que ofrezca. Devuelve false si esta cámara no tiene esa extensión o si
+     * la sesión no se pudo crear (el que llama usa entonces el motor propio).
+     */
+    @RequiresApi(31)
+    suspend fun startExtensionSession(texture: SurfaceTexture, extension: Int): Boolean {
+        val dev = device ?: return false
+        closeOutputs()
+        videoMode = false
+        val ec = runCatching { manager.getCameraExtensionCharacteristics(caps.id) }.getOrNull() ?: return false
+        if (!ec.supportedExtensions.contains(extension)) return false
+        val pv = runCatching { ec.getExtensionSupportedSizes(extension, SurfaceTexture::class.java) }.getOrDefault(emptyList())
+        val preview = pv.filter { CameraCapabilities.is43(it) && it.width <= 1920 }.maxByOrNull { it.width * it.height }
+            ?: pv.filter { it.width <= 1920 }.maxByOrNull { it.width * it.height } ?: return false
+        val js = runCatching { ec.getExtensionSupportedSizes(extension, ImageFormat.JPEG) }.getOrDefault(emptyList())
+        val still = js.filter { CameraCapabilities.is43(it) }.maxByOrNull { it.width.toLong() * it.height }
+            ?: js.maxByOrNull { it.width.toLong() * it.height } ?: return false
+        texture.setDefaultBufferSize(preview.width, preview.height)
+        previewSurface?.release()
+        val surface = Surface(texture)
+        previewSurface = surface
+        val reader = ImageReader.newInstance(still.width, still.height, ImageFormat.JPEG, 2)
+        val s = suspendCancellableCoroutine<CameraExtensionSession?> { cont ->
+            val cfg = ExtensionSessionConfiguration(
+                extension, listOf(OutputConfiguration(surface), OutputConfiguration(reader.surface)), executor,
+                object : CameraExtensionSession.StateCallback() {
+                    override fun onConfigured(session: CameraExtensionSession) { if (cont.isActive) cont.resume(session) }
+                    override fun onConfigureFailed(session: CameraExtensionSession) { if (cont.isActive) cont.resume(null) }
+                },
+            )
+            try {
+                dev.createExtensionSession(cfg)
+            } catch (e: Exception) {
+                Log.w(TAG, "createExtensionSession", e)
+                if (cont.isActive) cont.resume(null)
+            }
+        }
+        if (s == null) { reader.close(); return false }
+        extSession = s
+        extReader = reader
+        activeExtension = extension
+        photoInfo = null
+        extKeys = if (Build.VERSION.SDK_INT >= 34) {
+            runCatching { ec.getAvailableCaptureRequestKeys(extension) }.getOrDefault(emptySet())
+        } else emptySet()
+        Log.i(TAG, "Sesión con procesado del teléfono: extensión $extension, JPEG ${still.width}x${still.height}")
+        updateRepeating()
+        return true
+    }
+
+    /** Petición para la sesión de extensión: sólo las claves que el fabricante admite (zoom en Android 14+). */
+    @RequiresApi(31)
+    private fun extRequest(template: Int, target: Surface): CaptureRequest.Builder {
+        val dev = device ?: error("Cámara cerrada")
+        return dev.createCaptureRequest(template).apply {
+            addTarget(target)
+            if (Build.VERSION.SDK_INT >= 34 && extKeys.contains(CaptureRequest.CONTROL_ZOOM_RATIO)) set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom)
+        }
+    }
+
+    @RequiresApi(31)
+    private fun updateExtensionRepeating(es: CameraExtensionSession) {
+        val surface = previewSurface ?: return
+        runCatching {
+            es.setRepeatingRequest(extRequest(CameraDevice.TEMPLATE_PREVIEW, surface).build(), executor,
+                object : CameraExtensionSession.ExtensionCaptureCallback() {})
+        }.onFailure { Log.w(TAG, "setRepeatingRequest (extensión)", it) }
+    }
+
+    /**
+     * Foto con el procesado del teléfono: el fabricante entrega el JPEG terminado. [onProgress]
+     * recibe 0..100 si el teléfono informa del avance (Android 14+, p. ej. en noche).
+     */
+    @RequiresApi(31)
+    suspend fun captureExtension(jpegOrientation: Int, location: Location?, onProgress: (Int) -> Unit): ByteArray {
+        val es = extSession ?: error("Sesión no lista")
+        val reader = extReader ?: error("Sesión no lista")
+        val done = CompletableDeferred<ByteArray>()
+        reader.setOnImageAvailableListener({ r ->
+            val img = runCatching { r.acquireNextImage() }.getOrNull() ?: return@setOnImageAvailableListener
+            try {
+                val buf = img.planes[0].buffer
+                val bytes = ByteArray(buf.remaining())
+                buf.get(bytes)
+                done.complete(bytes)
+            } finally {
+                img.close()
+            }
+        }, handler)
+        val b = extRequest(CameraDevice.TEMPLATE_STILL_CAPTURE, reader.surface)
+        b.set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+        b.set(CaptureRequest.JPEG_QUALITY, 95.toByte())
+        if (location != null && Build.VERSION.SDK_INT >= 34 && extKeys.contains(CaptureRequest.JPEG_GPS_LOCATION)) {
+            b.set(CaptureRequest.JPEG_GPS_LOCATION, location)
+        }
+        es.capture(b.build(), executor, object : CameraExtensionSession.ExtensionCaptureCallback() {
+            override fun onCaptureFailed(session: CameraExtensionSession, request: CaptureRequest) {
+                done.completeExceptionally(IllegalStateException("El teléfono no pudo hacer la foto"))
+            }
+            override fun onCaptureProcessProgressed(session: CameraExtensionSession, request: CaptureRequest, progress: Int) {
+                onProgress(progress)
+            }
+        })
+        // La noche del fabricante puede tardar varios segundos.
+        return withTimeout(20_000) { done.await() }
     }
 
     /**
@@ -347,6 +476,8 @@ class CameraController(private val context: Context) {
     }
 
     private fun updateRepeating() {
+        val es = extSession
+        if (es != null && Build.VERSION.SDK_INT >= 31) { updateExtensionRepeating(es); return }
         val s = session ?: return
         val dev = device ?: return
         val surface = previewSurface ?: return

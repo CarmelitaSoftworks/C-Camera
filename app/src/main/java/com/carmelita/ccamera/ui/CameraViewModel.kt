@@ -180,6 +180,12 @@ data class CameraUiState(
     val lowLight: Boolean = false,
     /** La captura en curso es de noche (para pedir que no se mueva el teléfono). */
     val nightCapture: Boolean = false,
+    /** Usar el procesado del propio teléfono (Camera2 Extensions) cuando lo ofrezca: modo principal. */
+    val phoneProcessing: Boolean = true,
+    /** Extensión del teléfono en uso ahora (CameraCapabilities.EXT_*), o null = motor de C Camera. */
+    val extActive: Int? = null,
+    /** Extensiones que ofrece esta cámara. */
+    val extensions: List<Int> = emptyList(),
 ) {
     val ev: Float get() = evIndex * evStep
 }
@@ -214,6 +220,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 .getOrDefault(PortraitLighting.NATURAL),
             shareWithoutLocation = prefs.getBoolean("shareNoLocation", true),
             autoNight = prefs.getBoolean("autoNight", true),
+            phoneProcessing = prefs.getBoolean("phoneProcessing", true),
             stabilization = runCatching { Stabilization.valueOf(prefs.getString("stabilization", null) ?: "") }
                 .getOrDefault(Stabilization.AUTO),
         )
@@ -312,13 +319,24 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (controller.digitalStabilizerActive) watchStabilizer()
         } else {
-            val info = controller.startPhotoSession(t, wantLive = s.livePhoto, maxPixels = maxPixels)
-            _state.update {
-                it.copy(
-                    liveActive = info.live, rawActive = info.raw, zslActive = info.zsl,
-                    sessionSummary = "${if (info.raw) "RAW" else "YUV"} ${info.captureSize.width}×${info.captureSize.height}" +
-                        (if (info.zsl) " · ZSL" else "") + (if (info.live) " · En vivo" else ""),
-                )
+            val ext = desiredExtension(s, caps)
+            val extOk = ext != null && Build.VERSION.SDK_INT >= 31 && controller.startExtensionSession(t, ext)
+            if (extOk && ext != null) {
+                _state.update {
+                    it.copy(
+                        liveActive = false, rawActive = false, zslActive = false, extActive = ext,
+                        sessionSummary = "Procesado del teléfono · ${CameraCapabilities.extensionName(ext)}",
+                    )
+                }
+            } else {
+                val info = controller.startPhotoSession(t, wantLive = s.livePhoto, maxPixels = maxPixels)
+                _state.update {
+                    it.copy(
+                        liveActive = info.live, rawActive = info.raw, zslActive = info.zsl, extActive = null,
+                        sessionSummary = "${if (info.raw) "RAW" else "YUV"} ${info.captureSize.width}×${info.captureSize.height}" +
+                            (if (info.zsl) " · ZSL" else "") + (if (info.live) " · En vivo" else ""),
+                    )
+                }
             }
         }
         controller.setFlash(if (s.mode.isVideo) FlashMode.OFF else s.flash)
@@ -337,8 +355,34 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 slowMoLabel = caps.slowMotion?.let { (sz, fps) -> "${if (sz.height >= 1080) "1080p" else "${sz.height}p"} $fps" },
                 proCaps = proCaps(caps),
                 hasOis = caps.ois, hasHalEis = caps.halVideoStabilization, hasGyro = caps.hasGyro,
+                extensions = caps.extensions,
+                extActive = if (s.mode.isVideo) null else it.extActive,
             )
         }
+    }
+
+    /**
+     * Procesado del teléfono para este modo (si está activado y la cámara lo ofrece):
+     * Foto -> Automático (el fabricante decide noche/HDR/normal) o HDR; Noche -> Noche;
+     * Retrato -> Retrato. Pro, Panorámica y vídeo usan siempre el motor de C Camera.
+     */
+    private fun desiredExtension(s: CameraUiState, caps: CameraCapabilities): Int? {
+        if (!s.phoneProcessing || Build.VERSION.SDK_INT < 31) return null
+        val ex = caps.extensions
+        fun pick(vararg options: Int): Int? = options.firstOrNull { it in ex }
+        return when (s.mode) {
+            CaptureMode.PHOTO -> pick(CameraCapabilities.EXT_AUTOMATIC, CameraCapabilities.EXT_HDR)
+            CaptureMode.NIGHT -> pick(CameraCapabilities.EXT_NIGHT)
+            CaptureMode.PORTRAIT -> pick(CameraCapabilities.EXT_BOKEH)
+            else -> null
+        }
+    }
+
+    fun togglePhoneProcessing() {
+        val v = !_state.value.phoneProcessing
+        pref("phoneProcessing", v)
+        _state.update { it.copy(phoneProcessing = v) }
+        if (!_state.value.mode.isVideo) reconfigure()
     }
 
     /**
@@ -443,7 +487,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         val old = st.mode
         if (old == m || st.recording || st.capturing || st.panoActive || st.bursting || st.countdown > 0) return
         _state.update { it.copy(mode = m, qr = null, portraitSubject = null) }
-        if (old.isVideo != m.isVideo) reconfigure()
+        // Cambia la sesión si pasa de foto a vídeo o si el nuevo modo usa otro procesado del teléfono.
+        val extChange = controller.isOpen && !m.isVideo &&
+            desiredExtension(st.copy(mode = m), controller.caps) != st.extActive
+        if (old.isVideo != m.isVideo || extChange) reconfigure()
         else viewModelScope.launch { camMutex.withLock { if (controller.isOpen) applyModeControls(_state.value) } }
         // Retrato con el teleobjetivo si lo hay (2-3x: perspectiva más favorecedora, como el iPhone).
         // Al salir sólo se deshace ese zoom automático (no uno que eligiera el usuario); si el cambio
@@ -705,6 +752,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(capturing = true, captureProgress = 0f, shutterFlash = System.nanoTime(), qr = null,
                 thumbnail = instant ?: it.thumbnail)
         }
+        if (controller.activeExtension != null && Build.VERSION.SDK_INT >= 31) { takeExtensionPhoto(s, rotation); return }
 
         viewModelScope.launch(Dispatchers.Default) {
             val t0 = System.currentTimeMillis()
@@ -829,6 +877,48 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+
+    /** Foto con el procesado del teléfono: el JPEG llega terminado y se guarda tal cual. */
+    @androidx.annotation.RequiresApi(31)
+    private fun takeExtensionPhoto(s: CameraUiState, rotation: Int) {
+        viewModelScope.launch(Dispatchers.Default) {
+            val app = getApplication<Application>()
+            var counted = false
+            try {
+                val loc = if (s.saveLocation) runCatching { LocationHelper.lastKnownLocation(app) }.getOrNull() else null
+                val bytes = camMutex.withLock {
+                    controller.captureExtension(rotation, loc) { p -> progress(p / 100f) }
+                }
+                val n = processingCount.incrementAndGet()
+                counted = true
+                _state.update { it.copy(capturing = false, processing = n) }
+                val date = Date()
+                val uri = withContext(Dispatchers.IO) { MediaSaver.saveJpegBytes(app, bytes, date) }
+                val thumb = runCatching { jpegThumbnail(bytes) }.getOrNull()
+                _state.update {
+                    it.copy(processing = processingCount.decrementAndGet().coerceAtLeast(0), thumbnail = thumb ?: it.thumbnail,
+                        lastUri = uri, lastIsVideo = false, lastLiveClip = null)
+                }
+            } catch (e: Throwable) {
+                Log.e(TAG, "Foto con el procesado del teléfono", e)
+                val busy = if (counted) processingCount.decrementAndGet().coerceAtLeast(0) else processingCount.get()
+                _state.update { it.copy(capturing = false, processing = busy, message = "No se pudo hacer la foto: ${e.message}") }
+            }
+        }
+    }
+
+    /** Miniatura de un JPEG (reducida al decodificar y girada según su EXIF). */
+    private fun jpegThumbnail(bytes: ByteArray): Bitmap? {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 240) sample *= 2
+        val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
+            android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
+        val deg = androidx.exifinterface.media.ExifInterface(java.io.ByteArrayInputStream(bytes)).rotationDegrees
+        return if (deg == 0) bmp else Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height,
+            Matrix().apply { postRotate(deg.toFloat()) }, true).also { if (it !== bmp) bmp.recycle() }
+    }
 
     /**
      * Pasos comunes al guardar una foto revelada: espejo (frontal), recorte de proporción, EXIF

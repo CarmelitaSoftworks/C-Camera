@@ -202,6 +202,12 @@ class CameraCapabilities private constructor(
         chars.get(CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES)
             ?.supportedProfiles?.contains(DynamicRangeProfiles.HLG10) == true
 
+    // ---- Procesado del teléfono (Camera2 Extensions) ----
+    /** Modos de procesado del fabricante disponibles para otras apps en esta cámara. */
+    val extensions: List<Int> = if (Build.VERSION.SDK_INT >= 31) {
+        runCatching { manager.getCameraExtensionCharacteristics(id).supportedExtensions.toList() }.getOrDefault(emptyList())
+    } else emptyList()
+
     // ---- Salida ----
     val ultraHdr: Boolean = Build.VERSION.SDK_INT >= 34
 
@@ -242,6 +248,8 @@ class CameraCapabilities private constructor(
             "Enfoque macro" to yes(hasMacroAf),
             "Enfoque manual" to yes(manualFocus),
             "Compensación de exposición" to if (hasEv) "±%.1f EV".format(evRange.upper * evStep) else "No",
+            "Procesado del teléfono (Camera2 Extensions)" to
+                if (extensions.isEmpty()) "No" else extensions.joinToString(", ") { extensionName(it) },
             "Detección de caras" to yes(faceDetection),
             "Mapa de sombreado de lente" to yes(lensShadingMap),
         )
@@ -249,6 +257,22 @@ class CameraCapabilities private constructor(
 
     companion object {
         fun is43(s: Size) = abs(s.width * 3 - s.height * 4) <= s.width / 100
+
+        // Valores de CameraExtensionCharacteristics.EXTENSION_* (API 31).
+        const val EXT_AUTOMATIC = 0
+        const val EXT_FACE_RETOUCH = 1
+        const val EXT_BOKEH = 2
+        const val EXT_HDR = 3
+        const val EXT_NIGHT = 4
+
+        fun extensionName(e: Int): String = when (e) {
+            EXT_AUTOMATIC -> "Automático"
+            EXT_FACE_RETOUCH -> "Retoque facial"
+            EXT_BOKEH -> "Retrato"
+            EXT_HDR -> "HDR"
+            EXT_NIGHT -> "Noche"
+            else -> "Modo $e"
+        }
 
         fun fmtZoom(z: Float): String {
             val r = (z * 10).roundToInt() / 10f

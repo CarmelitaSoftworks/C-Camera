@@ -140,6 +140,8 @@ class CameraController(private val context: Context) {
     @SuppressLint("MissingPermission")
     suspend fun open(lens: Lens) {
         caps = CameraCapabilities.detect(manager, lens)
+        lastExtensionError = null
+        lastExtensionErrorIsNew = false
         zoom = 1f.coerceIn(caps.zoomRange.start, caps.zoomRange.endInclusive)
         focusRegions = null
         aeAfLocked = false
@@ -164,10 +166,14 @@ class CameraController(private val context: Context) {
     @Suppress("DEPRECATION")
     private suspend fun createSession(dev: CameraDevice, outputs: List<Surface>): CameraCaptureSession? =
         suspendCancellableCoroutine { cont ->
+            val closed = CompletableDeferred<Unit>()
             try {
                 dev.createCaptureSession(outputs, object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(s: CameraCaptureSession) { if (cont.isActive) cont.resume(s) }
+                    override fun onConfigured(s: CameraCaptureSession) {
+                        if (cont.isActive) { closedSignal = closed; cont.resume(s) } else s.close()
+                    }
                     override fun onConfigureFailed(s: CameraCaptureSession) { if (cont.isActive) cont.resume(null) }
+                    override fun onClosed(s: CameraCaptureSession) { closed.complete(Unit) }
                 }, handler)
             } catch (e: Exception) {
                 Log.w(TAG, "createCaptureSession", e)
@@ -194,73 +200,106 @@ class CameraController(private val context: Context) {
         activeExtension = null
     }
 
-    /**
-     * Sesión de foto con el procesado del propio teléfono (Camera2 Extensions: el fabricante hace
-     * la fusión, el HDR, la noche o el retrato con su ISP y sus algoritmos). Vista previa 4:3 + JPEG
-     * a la máxima resolución que ofrezca. Devuelve false si esta cámara no tiene esa extensión o si
-     * la sesión no se pudo crear (el que llama usa entonces el motor propio).
-     */
     /** Motivo del último fallo al iniciar el procesado del teléfono (para mostrarlo), o null. */
     var lastExtensionError: String? = null
         private set
+    /** ¿El último fallo es nuevo? (los ya conocidos no se vuelven a avisar). */
+    var lastExtensionErrorIsNew = false
+        private set
+    /** Fallos ya vistos por cámara y modo ("id:extensión" -> motivo): no se reintentan en esta ejecución. */
+    private val extFailures = HashMap<String, String>()
+    /** Se completa cuando la sesión actual (normal o de extensión) termina de cerrarse. */
+    @Volatile private var closedSignal: CompletableDeferred<Unit>? = null
 
+    /** Olvida los fallos (p. ej. al volver a activar el procesado del teléfono en Ajustes). */
+    fun clearExtensionFailures() { extFailures.clear() }
+
+    /**
+     * Sesión de foto con el procesado del propio teléfono (Camera2 Extensions: el fabricante hace
+     * la fusión, el HDR, la noche o el retrato con su ISP y sus algoritmos). Vista previa 4:3 + JPEG.
+     * Devuelve false si esta cámara no tiene esa extensión o si la sesión no se pudo crear (el que
+     * llama usa entonces el motor propio); el motivo queda en [lastExtensionError]. Un fallo se
+     * recuerda para no repetir la espera en cada cambio de modo.
+     */
     @RequiresApi(31)
     suspend fun startExtensionSession(texture: SurfaceTexture, extension: Int): Boolean {
         lastExtensionError = null
-        fun fail(why: String): Boolean { lastExtensionError = why; Log.w(TAG, "Procesado del teléfono: $why"); return false }
-        val dev = device ?: return fail("cámara cerrada")
+        lastExtensionErrorIsNew = false
+        val key = "${caps.id}:$extension"
+        extFailures[key]?.let { lastExtensionError = it; return false }
+        fun fail(why: String): Boolean {
+            lastExtensionError = why
+            lastExtensionErrorIsNew = true
+            extFailures[key] = why
+            Log.w(TAG, "Procesado del teléfono: $why")
+            return false
+        }
+        val dev = device ?: return fail("la cámara está cerrada")
+        // Esperar a que la sesión anterior termine de cerrarse (algunos fabricantes lo necesitan).
+        val prevClosed = closedSignal
         closeOutputs()
+        if (prevClosed != null) withTimeoutOrNull(1_000) { prevClosed.await() }
         videoMode = false
-        // Algunos fabricantes necesitan que la sesión anterior termine de cerrarse.
-        delay(200)
         val ec = runCatching { manager.getCameraExtensionCharacteristics(caps.id) }
-            .getOrElse { return fail("no se pudieron leer los modos (${it.message})") }
-        if (!ec.supportedExtensions.contains(extension)) return fail("la cámara ${caps.id} no ofrece este modo")
+            .getOrElse { return fail("no se pudieron leer los modos del teléfono") }
+        if (!ec.supportedExtensions.contains(extension)) return fail("esta cámara no ofrece este modo")
         val pv = runCatching { ec.getExtensionSupportedSizes(extension, SurfaceTexture::class.java) }.getOrDefault(emptyList())
         val js = runCatching { ec.getExtensionSupportedSizes(extension, ImageFormat.JPEG) }.getOrDefault(emptyList())
-        if (pv.isEmpty() || js.isEmpty()) return fail("el teléfono no indica resoluciones (vista previa ${pv.size}, JPEG ${js.size})")
+        if (pv.isEmpty() || js.isEmpty()) return fail("el teléfono no indica resoluciones para este modo")
         fun area(z: Size) = z.width.toLong() * z.height
-        val preview43 = pv.filter { CameraCapabilities.is43(it) && it.width <= 1920 }.maxByOrNull { area(it) }
         val previewAny = pv.filter { it.width <= 1920 }.maxByOrNull { area(it) } ?: pv.minByOrNull { area(it) }!!
+        val preview = pv.filter { CameraCapabilities.is43(it) && it.width <= 1920 }.maxByOrNull { area(it) } ?: previewAny
         val jpeg43 = js.filter { CameraCapabilities.is43(it) }.sortedByDescending { area(it) }
-        // Combinaciones a probar: la mejor; JPEG 4:3 de ~12 MP; y la más conservadora.
-        val attempts = listOfNotNull(
-            (preview43 ?: previewAny) to (jpeg43.firstOrNull() ?: js.maxByOrNull { area(it) }!!),
-            jpeg43.firstOrNull { area(it) <= 12_600_000L }?.let { (preview43 ?: previewAny) to it },
-            previewAny to js.minByOrNull { kotlin.math.abs(area(it) - 8_000_000L) }!!,
+        val jpegPool = jpeg43.ifEmpty { js.sortedByDescending { area(it) } }
+        // Combinaciones (misma proporción que la vista previa): la mejor, ~12 MP y ~8 MP.
+        val stills = listOfNotNull(
+            jpegPool.first(),
+            jpegPool.firstOrNull { area(it) <= 12_600_000L },
+            jpegPool.minByOrNull { kotlin.math.abs(area(it) - 8_000_000L) },
         ).distinct()
         val errors = ArrayList<String>()
-        for ((preview, still) in attempts) {
-            texture.setDefaultBufferSize(preview.width, preview.height)
-            previewSurface?.release()
-            val surface = Surface(texture)
-            previewSurface = surface
+        for (still in stills) {
+            if (texture.isReleased) return fail("se cerró la vista previa")
+            val surface = try {
+                texture.setDefaultBufferSize(preview.width, preview.height)
+                previewSurface?.release()
+                Surface(texture).also { previewSurface = it }
+            } catch (e: Exception) {
+                return fail("se cerró la vista previa")
+            }
             val reader = ImageReader.newInstance(still.width, still.height, ImageFormat.JPEG, 2)
             var error: String? = null
-            val s = withTimeoutOrNull(5_000) {
+            var timedOut = false
+            val closed = CompletableDeferred<Unit>()
+            val s = withTimeoutOrNull(EXT_CONFIGURE_TIMEOUT_MS) {
                 suspendCancellableCoroutine<CameraExtensionSession?> { cont ->
                     val cfg = ExtensionSessionConfiguration(
                         extension, listOf(OutputConfiguration(surface), OutputConfiguration(reader.surface)), executor,
                         object : CameraExtensionSession.StateCallback() {
-                            override fun onConfigured(session: CameraExtensionSession) { if (cont.isActive) cont.resume(session) }
+                            override fun onConfigured(session: CameraExtensionSession) {
+                                // Si llega tarde (tras el límite de tiempo) se cierra: no queda una sesión huérfana.
+                                if (cont.isActive) cont.resume(session) else session.close()
+                            }
                             override fun onConfigureFailed(session: CameraExtensionSession) {
-                                error = "el teléfono rechazó la sesión"
+                                error = "el teléfono rechazó la configuración"
                                 if (cont.isActive) cont.resume(null)
                             }
+                            override fun onClosed(session: CameraExtensionSession) { closed.complete(Unit) }
                         },
                     )
                     try {
                         dev.createExtensionSession(cfg)
                     } catch (e: Exception) {
-                        error = "${e.javaClass.simpleName}: ${e.message}"
+                        error = "error del sistema de cámara (${e.javaClass.simpleName})"
                         if (cont.isActive) cont.resume(null)
                     }
                 }
-            }
+            }.also { if (it == null && error == null) timedOut = true }
             if (s != null) {
                 extSession = s
                 extReader = reader
                 activeExtension = extension
+                closedSignal = closed
                 photoInfo = null
                 extKeys = if (Build.VERSION.SDK_INT >= 34) {
                     runCatching { ec.getAvailableCaptureRequestKeys(extension) }.getOrDefault(emptySet())
@@ -269,9 +308,16 @@ class CameraController(private val context: Context) {
                 updateRepeating()
                 return true
             }
+            errors += if (timedOut) "el teléfono no respondió (JPEG ${still.width}×${still.height})"
+            else "${error ?: "fallo desconocido"} (JPEG ${still.width}×${still.height})"
+            if (timedOut) {
+                // Una sesión aún pendiente puede llegar tarde: no se crean más encima. El lector se
+                // cierra cuando esa sesión termine (o enseguida si no llega).
+                withTimeoutOrNull(1_000) { closed.await() }
+                reader.close()
+                break
+            }
             reader.close()
-            errors += "${error ?: "sin respuesta en 5 s"} (JPEG ${still.width}×${still.height})"
-            delay(150)
         }
         return fail(errors.joinToString("; "))
     }
@@ -873,6 +919,8 @@ class CameraController(private val context: Context) {
     companion object {
         private const val TAG = "CCamera"
         const val RING = 6
+        /** Límite para que el teléfono configure una sesión con su procesado. */
+        private const val EXT_CONFIGURE_TIMEOUT_MS = 4_000L
     }
 }
 

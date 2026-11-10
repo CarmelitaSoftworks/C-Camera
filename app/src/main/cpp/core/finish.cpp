@@ -10,7 +10,7 @@ StyleParams styleParams(Style s) {
         case Style::Vibrant: return {0.15f, 0.1f, 0.75f};
         case Style::Warm: return {0.f, 0.7f, 0.4f};
         case Style::Cool: return {0.f, -0.5f, 0.4f};
-        default: return {0.f, 0.12f, 0.4f};
+        default: return {0.f, 0.f, 0.4f};
     }
 }
 
@@ -228,6 +228,32 @@ Plane localGain(const LowRes& lr, const FinishParams& p, float pre) {
 }
 
 }  // namespace
+
+void whiteBalanceFix(const std::vector<float>& r, const std::vector<float>& g, const std::vector<float>& b,
+                     float& gainR, float& gainB) {
+    gainR = gainB = 1.f;
+    size_t n = r.size();
+    if (n < 1000 || g.size() != n || b.size() != n) return;
+    std::vector<float> lum(n);
+    for (size_t i = 0; i < n; i++) lum[i] = 0.2126f * r[i] + 0.7152f * g[i] + 0.0722f * b[i];
+    std::vector<float> s(lum);
+    size_t k0 = size_t(n * 0.85), k1 = std::min(n - 1, size_t(n * 0.97));
+    std::nth_element(s.begin(), s.begin() + k0, s.end());
+    float lo = s[k0];
+    std::nth_element(s.begin(), s.begin() + k1, s.end());
+    float hi = s[k1];
+    double sr = 0, sg = 0, sb = 0;
+    size_t c = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (lum[i] < lo || lum[i] > hi) continue;
+        if (std::max(r[i], std::max(g[i], b[i])) > 0.95f) continue;   // quemado: color poco fiable
+        sr += r[i]; sg += g[i]; sb += b[i]; c++;
+    }
+    if (c < 100 || sr <= 0 || sb <= 0 || sg <= 0) return;
+    const float strength = 0.6f;
+    gainR = std::min(std::max(float(std::pow(sg / sr, strength)), 0.8f), 1.3f);
+    gainB = std::min(std::max(float(std::pow(sg / sb, strength)), 0.8f), 1.45f);
+}
 
 float autoBrightnessGain(const std::vector<float>& lum, bool smartHdr, float maxGain) {
     if (lum.empty() || maxGain <= 1.f) return 1.f;
@@ -474,6 +500,13 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
     GainField field = makeField(lr, p);
     const Plane& gain = field.gain;
     Renderer rd(p.style, p.saturation);
+    {
+        // Tinte residual del balance de blancos del teléfono (p. ej. pared blanca amarilla con bombilla).
+        float cr, cb;
+        whiteBalanceFix(lr.r.d, lr.g.d, lr.b.d, cr, cb);
+        rd.warmR *= cr;
+        rd.warmB *= cb;
+    }
     if (p.gainMap) buildGainMap(lr, gain, rd, p.hdrHeadroom, gm);
 
     // 4) Mosaico RGGB canónico + demosaico Malvar-He-Cutler + render por franjas.
@@ -588,6 +621,13 @@ void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, 
     GainField field = makeField(lr, p);
     const Plane& gain = field.gain;
     Renderer rd(p.style, p.saturation);
+    {
+        // Tinte residual del balance de blancos del teléfono (p. ej. pared blanca amarilla con bombilla).
+        float cr, cb;
+        whiteBalanceFix(lr.r.d, lr.g.d, lr.b.d, cr, cb);
+        rd.warmR *= cr;
+        rd.warmB *= cb;
+    }
     if (p.gainMap) buildGainMap(lr, gain, rd, p.hdrHeadroom, gm);
 
     float gsx = gain.w / float(w), gsy = gain.h / float(h);

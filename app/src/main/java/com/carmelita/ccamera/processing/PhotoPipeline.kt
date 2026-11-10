@@ -96,7 +96,6 @@ class PhotoJob(private val caps: CameraCapabilities, private val raw: Boolean) :
         val g = r?.get(CaptureResult.COLOR_CORRECTION_GAINS)
         if (g != null) { out[0] = g.red; out[1] = g.greenEven; out[2] = g.greenOdd; out[3] = g.blue }
         else { out[0] = 2f; out[1] = 1f; out[2] = 1f; out[3] = 1.6f }
-        keepWarmth(out)
         val t = r?.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)
         if (t != null) {
             for (row in 0 until 3) for (col in 0 until 3) out[4 + row * 3 + col] = t.getElement(col, row).toFloat()
@@ -105,19 +104,6 @@ class PhotoJob(private val caps: CameraCapabilities, private val raw: Boolean) :
             floatArrayOf(1.7f, -0.55f, -0.15f, -0.25f, 1.55f, -0.3f, 0.02f, -0.6f, 1.58f).copyInto(out, 4)
         }
         return out
-    }
-
-    /**
-     * Con luz cálida (bombillas: el AWB sube mucho el azul respecto al rojo) no se neutraliza del
-     * todo: se conserva parte del tono cálido, como hacen el iPhone y las cámaras de fábrica.
-     */
-    private fun keepWarmth(wb: FloatArray) {
-        val ratio = wb[3] / wb[0].coerceAtLeast(0.1f)          // ganancia azul / roja
-        val t = ((ratio - 1.2f) / (2.3f - 1.2f)).coerceIn(0f, 1f)
-        val w = t * t * (3f - 2f * t)
-        // Calibrado con la cámara de fábrica (madera bajo bombilla: rojo/verde 2,47 frente a 1,76).
-        wb[0] *= 1f + 0.23f * w
-        wb[3] *= 1f - 0.35f * w
     }
 
     private fun lensShading(): Triple<FloatArray, Int, Int>? {

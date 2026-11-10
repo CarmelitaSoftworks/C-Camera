@@ -33,6 +33,15 @@ struct FinishParams {
     float saturation = 1.f;
 };
 
+/**
+ * Corrección del tinte que deja el balance de blancos del teléfono: mide el color medio de las
+ * zonas claras (percentil 85-97, sin quemar), que suelen ser neutras (paredes, superficies
+ * iluminadas), y devuelve ganancias para R y B (G = 1) que lo acercan un 60 % al gris. Limitadas
+ * para no "apagar" escenas que de verdad son de un color.
+ */
+void whiteBalanceFix(const std::vector<float>& r, const std::vector<float>& g, const std::vector<float>& b,
+                     float& gainR, float& gainB);
+
 /** Ganancia global del brillo automático para una luma lineal de baja resolución (>= 1). */
 float autoBrightnessGain(const std::vector<float>& lum, bool smartHdr, float maxGain);
 

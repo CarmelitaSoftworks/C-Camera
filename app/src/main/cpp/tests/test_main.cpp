@@ -315,11 +315,34 @@ static void testAutoBrightness() {
     std::printf("  ganancia escena a contraluz: %.2f\n", g);
 }
 
+static void testWhiteBalanceFix() {
+    std::printf("Tinte residual\n");
+    // Escena con luz de bombilla mal compensada: zonas claras amarillas (R 0,8, G 0,62, B 0,35).
+    std::vector<float> r, g, b;
+    for (int i = 0; i < 20000; i++) {
+        float t = (i % 100) / 100.f;
+        r.push_back(0.8f * t); g.push_back(0.62f * t); b.push_back(0.35f * t);
+    }
+    float gr, gb;
+    whiteBalanceFix(r, g, b, gr, gb);
+    float rr = 0.8f * gr, bb = 0.35f * gb;
+    std::printf("  ganancias R %.2f B %.2f -> blanco R %.2f G 0.62 B %.2f\n", gr, gb, rr, bb);
+    CHECK(gr < 1.f && gb > 1.f, "debería quitar amarillo (menos rojo, más azul)");
+    CHECK(std::fabs(rr - 0.62f) < std::fabs(0.8f - 0.62f) && std::fabs(bb - 0.62f) < std::fabs(0.35f - 0.62f),
+          "el blanco debería acercarse al gris");
+    // Escena ya neutra: no cambia.
+    std::vector<float> n(20000);
+    for (int i = 0; i < 20000; i++) n[i] = 0.5f * (i % 100) / 100.f;
+    whiteBalanceFix(n, n, n, gr, gb);
+    CHECK(std::fabs(gr - 1.f) < 1e-3f && std::fabs(gb - 1.f) < 1e-3f, "una escena neutra no debería cambiar");
+}
+
 int main(int argc, char** argv) {
     const char* outDir = argc > 1 ? argv[1] : ".";
     testLanczos();
     testAutoBrightness();
     testPortraitDepth();
+    testWhiteBalanceFix();
     testYuv(outDir);
     testRaw(outDir);
     if (failures) { std::printf("%d fallos\n", failures); return 1; }

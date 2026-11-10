@@ -329,16 +329,23 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             } else {
-                // Si se quería el procesado del teléfono y no arrancó, se dice por qué (y se usa el propio).
-                val extError = if (ext != null) controller.lastExtensionError ?: "no disponible" else null
-                if (extError != null) toast("El procesado del teléfono no arrancó: $extError. Se usa el de C Camera.")
+                // Si se quería el procesado del teléfono y no arrancó, se dice por qué (una sola vez por
+                // cámara y modo) y se usa el motor propio.
+                val extError = when {
+                    ext == null -> null
+                    Build.VERSION.SDK_INT < 31 -> "necesita Android 12 o superior"
+                    else -> controller.lastExtensionError ?: "no disponible"
+                }
+                if (extError != null && controller.lastExtensionErrorIsNew) {
+                    toast("El procesado del teléfono no arrancó: $extError. Se usa el de C Camera.")
+                }
                 val info = controller.startPhotoSession(t, wantLive = s.livePhoto, maxPixels = maxPixels)
                 _state.update {
                     it.copy(
                         liveActive = info.live, rawActive = info.raw, zslActive = info.zsl, extActive = null,
                         sessionSummary = "${if (info.raw) "RAW" else "YUV"} ${info.captureSize.width}×${info.captureSize.height}" +
                             (if (info.zsl) " · ZSL" else "") + (if (info.live) " · En vivo" else "") +
-                            (if (extError != null) " · procesado del teléfono falló: $extError" else ""),
+                            (if (extError != null) " · procesado del teléfono no disponible ($extError)" else ""),
                     )
                 }
             }
@@ -385,6 +392,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     fun togglePhoneProcessing() {
         val v = !_state.value.phoneProcessing
         pref("phoneProcessing", v)
+        // Al reactivarlo se vuelve a intentar aunque antes fallara.
+        if (v) viewModelScope.launch { camMutex.withLock { controller.clearExtensionFailures() } }
         _state.update { it.copy(phoneProcessing = v) }
         if (!_state.value.mode.isVideo) reconfigure()
     }

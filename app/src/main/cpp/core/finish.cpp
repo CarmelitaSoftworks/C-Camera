@@ -460,6 +460,9 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
         Plane sq(pl.w, pl.h);
         for (size_t i = 0; i < sq.d.size(); i++) sq.d[i] = std::sqrt(std::max(pl.d[i], 0.f));
         float sqSigma = sigma / (2.f * std::sqrt(0.18f));   // d(sqrt x) = dx / (2 sqrt x) a nivel medio
+        // Ruido de luma que queda tras la fusión (noche: luego lo amplifica el brillo automático).
+        // Sólo por encima de un umbral: con luz no cambia nada.
+        if (sqSigma > 1.5f / 255.f) sq = bilateral5(sq, 2.5f * sqSigma);
         sharpenPlane(sq, sqSigma, p.sharpen * 0.8f);
         // Textura a escala media (~1/500 del ancho del mosaico): da el aspecto "detallado".
         texturePlane(sq, std::max(2, pw / 500), 0.45f * p.sharpen, sqSigma * 1.2f);

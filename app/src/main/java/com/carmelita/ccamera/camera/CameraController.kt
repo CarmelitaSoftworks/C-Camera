@@ -191,6 +191,7 @@ class CameraController(private val context: Context) {
         live = null
         recordSurface = null
         highSpeed = false
+        streamPaused = false
         stabilizer?.release()
         stabilizer = null
         runCatching { extSession?.close() }
@@ -580,8 +581,10 @@ class CameraController(private val context: Context) {
         }
         if (!videoMode) {
             val info = photoInfo
-            if (info?.zsl == true) reader?.surface?.let { b.addTarget(it) }
-            live?.surface?.let { b.addTarget(it) }
+            // En reposo sólo va la vista previa: el RAW/YUV a resolución completa y el vídeo de
+            // Fotos en vivo gastan batería y calientan el teléfono aunque no se haga ninguna foto.
+            if (info?.zsl == true && !streamPaused) reader?.surface?.let { b.addTarget(it) }
+            if (!streamPaused) live?.surface?.let { b.addTarget(it) }
             if (info?.raw == true && caps.lensShadingMap) {
                 b.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
             }
@@ -704,6 +707,17 @@ class CameraController(private val context: Context) {
 
     /** Ajustes manuales (modo Pro); null vuelve a automático. */
     fun setPro(p: ProSettings?) { pro = p; updateRepeating() }
+
+    /** Reposo: sin flujo a resolución completa ni vídeo de Fotos en vivo (ahorra batería). */
+    @Volatile var streamPaused = false
+        private set
+
+    fun setStreamPaused(paused: Boolean) {
+        if (paused == streamPaused) return
+        streamPaused = paused
+        frames.setPaused(paused)
+        updateRepeating()
+    }
 
     /** Bloquea AE y balance de blancos sin región (panorámica: que no cambie el brillo entre franjas). */
     fun setExposureHold(on: Boolean) { exposureHold = on; updateRepeating() }

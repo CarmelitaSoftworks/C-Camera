@@ -253,7 +253,33 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         if (info.totalMem >= 6L shl 30) 16_000_000L else if (info.totalMem >= 4L shl 30) 13_000_000L else 8_500_000L
     }
 
-    init { startQrLoop(); startPortraitLoop(); startLowLightLoop() }
+    init { startQrLoop(); startPortraitLoop(); startLowLightLoop(); startIdleLoop() }
+
+    @Volatile private var lastInteractionMs = System.currentTimeMillis()
+
+    /** La interfaz avisa de cualquier toque en pantalla: reanuda la cámara si estaba en reposo. */
+    fun onUserInteraction() {
+        lastInteractionMs = System.currentTimeMillis()
+        if (controller.streamPaused) viewModelScope.launch { camMutex.withLock { controller.setStreamPaused(false) } }
+    }
+
+    /**
+     * Reposo para ahorrar batería: tras [IDLE_PAUSE_MS] sin tocar la pantalla en un modo de foto,
+     * se deja sólo la vista previa (sin RAW/YUV a resolución completa ni vídeo de Fotos en vivo).
+     */
+    private fun startIdleLoop() {
+        viewModelScope.launch {
+            while (isActive) {
+                delay(2_000)
+                val s = _state.value
+                val busy = s.capturing || s.bursting || s.panoActive || s.countdown > 0 || s.recording || s.processing > 0
+                if (s.mode.isVideo || busy || !controller.isOpen || controller.streamPaused) continue
+                if (System.currentTimeMillis() - lastInteractionMs > IDLE_PAUSE_MS) {
+                    camMutex.withLock { if (controller.isOpen) controller.setStreamPaused(true) }
+                }
+            }
+        }
+    }
 
     fun toggleAutoNight() { val v = !_state.value.autoNight; pref("autoNight", v); _state.update { it.copy(autoNight = v) } }
 
@@ -728,6 +754,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     // ---------------- Foto ----------------
 
     fun shutter() {
+        lastInteractionMs = System.currentTimeMillis()   // también con los botones de volumen
         val s = _state.value
         if (s.mode.isVideo) { toggleRecording(); return }
         if (s.mode == CaptureMode.PANO) { togglePano(); return }
@@ -768,6 +795,11 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         if (controller.activeExtension != null && Build.VERSION.SDK_INT >= 31) { takeExtensionPhoto(s, rotation); return }
 
         viewModelScope.launch(Dispatchers.Default) {
+            // Si la cámara estaba en reposo, se reanuda y se espera a tener fotogramas ZSL (~7 a 30 fps).
+            if (controller.streamPaused) {
+                camMutex.withLock { controller.setStreamPaused(false) }
+                delay(240)
+            }
             val t0 = System.currentTimeMillis()
             var job: PhotoJob? = null
             var liveClip: Deferred<Pair<File, Long>?>? = null
@@ -1248,9 +1280,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val TAG = "CCamera"
         private const val PHOTO_FRAMES = 6
-        private const val NIGHT_FRAMES = 8
+        /** Noche: más fotogramas = menos ruido (la fusión acumula: más tiempo, no más memoria). */
+        private const val NIGHT_FRAMES = 12
         /** Noche automática: menos fotogramas que el modo Noche (más rápida, como la de fábrica). */
-        private const val AUTO_NIGHT_FRAMES = 5
+        private const val AUTO_NIGHT_FRAMES = 8
         private const val SHORT_RATIO = 6f
         private const val BURST_MAX = 50
         private const val BURST_INTERVAL_MS = 220L
@@ -1261,6 +1294,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         /** Time-lapse: 2 fotogramas por segundo reproducidos a 30 → 15x más rápido. */
         private const val TIMELAPSE_CAPTURE_FPS = 2.0
         private const val SHARE_CACHE_MAX_AGE_MS = 60 * 60_000L
+        /** Segundos sin tocar la pantalla antes de pasar la cámara a reposo. */
+        private const val IDLE_PAUSE_MS = 15_000L
         /** A partir de este ISO en la vista previa, Foto usa la captura de noche. */
         private const val AUTO_NIGHT_ISO = 1600
     }

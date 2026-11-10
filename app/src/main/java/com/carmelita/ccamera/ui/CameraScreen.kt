@@ -76,6 +76,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
@@ -146,7 +147,18 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
 
     val video = state.mode.isVideo
     val photoLike = !video && state.mode != CaptureMode.PANO
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        Modifier.fillMaxSize().background(Color.Black)
+            // Cualquier toque (sin consumirlo) cuenta como actividad: saca la cámara del reposo.
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent(PointerEventPass.Initial)
+                        vm.onUserInteraction()
+                    }
+                }
+            },
+    ) {
         Column(Modifier.fillMaxSize().systemBarsPadding()) {
             TopBar(state, rot, showStyles, vm, onStyles = { showStyles = !showStyles },
                 apertureOpen = showAperture, onAperture = { showAperture = !showAperture })

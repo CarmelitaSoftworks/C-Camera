@@ -113,10 +113,11 @@ class PhotoJob(private val caps: CameraCapabilities, private val raw: Boolean) :
      */
     private fun keepWarmth(wb: FloatArray) {
         val ratio = wb[3] / wb[0].coerceAtLeast(0.1f)          // ganancia azul / roja
-        val t = ((ratio - 1.3f) / (2.4f - 1.3f)).coerceIn(0f, 1f)
+        val t = ((ratio - 1.2f) / (2.3f - 1.2f)).coerceIn(0f, 1f)
         val w = t * t * (3f - 2f * t)
-        wb[0] *= 1f + 0.15f * w
-        wb[3] *= 1f - 0.30f * w
+        // Calibrado con la cámara de fábrica (madera bajo bombilla: rojo/verde 2,47 frente a 1,76).
+        wb[0] *= 1f + 0.23f * w
+        wb[3] *= 1f - 0.35f * w
     }
 
     private fun lensShading(): Triple<FloatArray, Int, Int>? {

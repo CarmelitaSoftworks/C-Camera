@@ -188,7 +188,12 @@ class DigitalStabilizer(
         input.updateTexImage()
         input.getTransformMatrix(texMatrix)
         val frameNs = input.timestamp
-        val sensorNs = if (realtimeTimestamps) frameNs else frameNs + (SystemClock.elapsedRealtimeNanos() - System.nanoTime())
+        // Dos relojes: los sensores (giroscopio) usan elapsedRealtime (cuenta el tiempo dormido) y el
+        // grabador usa el monótono de System.nanoTime() (no lo cuenta). Mezclarlos dejó un vídeo con
+        // la imagen empezando a las 41 h (el tiempo que el teléfono llevaba dormido) y el audio en 0.
+        val sleepOffset = SystemClock.elapsedRealtimeNanos() - System.nanoTime()
+        val sensorNs = if (realtimeTimestamps) frameNs else frameNs + sleepOffset
+        val monoNs = if (realtimeTimestamps) frameNs - sleepOffset else frameNs
         val o = gyro.at(sensorNs)
         val stab = if (o != null) {
             val (jx, jy, jz) = path.update(sensorNs, o.first, o.second, o.third)
@@ -201,7 +206,12 @@ class DigitalStabilizer(
         }
         for (t in targets) {
             if (!EGL14.eglMakeCurrent(display, t.egl, t.egl, context)) continue
-            GLES20.glViewport(0, 0, t.w, t.h)
+            // El tamaño se consulta en cada fotograma: al volver a la app la superficie de la vista
+            // previa cambia de tamaño después de crearse (se veía pequeña, apaisada y abajo).
+            val qw = IntArray(1); val qh = IntArray(1)
+            EGL14.eglQuerySurface(display, t.egl, EGL14.EGL_WIDTH, qw, 0)
+            EGL14.eglQuerySurface(display, t.egl, EGL14.EGL_HEIGHT, qh, 0)
+            GLES20.glViewport(0, 0, if (qw[0] > 0) qw[0] else t.w, if (qh[0] > 0) qh[0] else t.h)
             GLES20.glUseProgram(program)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
@@ -212,7 +222,7 @@ class DigitalStabilizer(
             GLES20.glEnableVertexAttribArray(pos)
             GLES20.glVertexAttribPointer(pos, 2, GLES20.GL_FLOAT, false, 0, quad)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            if (t.record) EGLExt.eglPresentationTimeANDROID(display, t.egl, frameNs)
+            if (t.record) EGLExt.eglPresentationTimeANDROID(display, t.egl, monoNs)
             if (EGL14.eglSwapBuffers(display, t.egl) && !t.record) previewFrames++
         }
     }

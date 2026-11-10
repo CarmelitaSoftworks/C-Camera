@@ -29,7 +29,7 @@ struct Renderer {
         StyleParams p = styleParams(s);
         warmR = 1.f + 0.06f * p.warmth;
         warmB = 1.f - 0.06f * p.warmth;
-        contrast = 0.42f + 0.4f * p.tone;
+        contrast = 0.55f + 0.35f * p.tone;
         vib = p.vibrance;
     }
     static float curve(float s, float c) {
@@ -40,7 +40,8 @@ struct Renderer {
     void sdr(float r, float g, float b, float* o) const {
         r *= warmR; b *= warmB;
         // Punto negro: el ISP del teléfono deja los negros en negro; sin esto las sombras salen lavadas.
-        const float black = 0.0035f;
+        // Calibrado con fotos de la cámara de fábrica (vivo V30): negros a ~0 en interiores.
+        const float black = 0.012f;
         r = std::max(r - black, 0.f) * (1.f + black);
         g = std::max(g - black, 0.f) * (1.f + black);
         b = std::max(b - black, 0.f) * (1.f + black);
@@ -212,7 +213,8 @@ Plane localGain(const LowRes& lr, const FinishParams& p, float pre) {
     std::nth_element(sorted.begin(), sorted.begin() + k99, sorted.end());
     float p99 = std::max(sorted[k99], 1e-4f);
     float dark = std::min(0.3f, 0.35f / p99);
-    Plane g = fuseGain(lum, {dark, 1.f, 2.2f}, 0.6f);
+    // Exposición sintética clara 1,8 (antes 2,2): las sombras levantadas de más se veían lavadas.
+    Plane g = fuseGain(lum, {dark, 1.f, 1.8f}, 0.6f);
     // Los halos de la fusión aparecen porque la ganancia "se derrama" alrededor de los bordes
     // fuertes (ventanas, cielo). Un filtro guiado por la luma la pega a los bordes.
     Plane lg(g.w, g.h), ll(g.w, g.h);
@@ -239,7 +241,7 @@ float autoBrightnessGain(const std::vector<float>& lum, bool smartHdr, float max
     // fondo brillante (en contraluz el sujeto queda en esa mitad).
     float p25 = pct(0.25f), p50 = pct(0.5f), p75 = pct(0.75f);
     float key = std::exp((std::log(p25) + 2.f * std::log(p50) + std::log(p75)) / 4.f);
-    const float target = 0.14f;                 // ≈ 0,41 en sRGB
+    const float target = 0.12f;                 // ≈ 0,38 en sRGB
     float g = target / key;
     // Límite por luces: con Smart HDR las luces se comprimen, así que admite más.
     float p99 = pct(0.99f);

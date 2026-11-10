@@ -65,6 +65,8 @@ sealed class CapturedFrame {
 class FrameBuffer(private val capacity: Int) {
     private val ring = ArrayDeque<Image>()
     private val waiting = HashMap<Long, CompletableDeferred<CapturedFrame>>()
+    /** Fotogramas pedidos que llegaron antes de que alguien los esperara (ya copiados). */
+    private val ready = HashMap<Long, CapturedFrame>()
     private val results = LinkedHashMap<Long, TotalCaptureResult>()
     private val reserved = HashSet<Long>()
     private var paused = false
@@ -85,6 +87,9 @@ class FrameBuffer(private val capacity: Int) {
         val ts = img.timestamp
         val w = waiting.remove(ts)
         if (w != null) { w.complete(CapturedFrame.from(img)); return }
+        // Pedido pero aún no esperado: se copia y se suelta el Image enseguida. Si se quedara en el
+        // anillo, una ráfaga larga (noche de 12) podía agotar los maxImages del ImageReader.
+        if (ts in reserved) { reserved -= ts; ready[ts] = CapturedFrame.from(img); return }
         if ((capacity <= 0 || paused) && ts !in reserved) { img.close(); return }
         ring.addLast(img)
         // Descarta los más viejos que nadie ha pedido.
@@ -117,6 +122,7 @@ class FrameBuffer(private val capacity: Int) {
         val d: CompletableDeferred<CapturedFrame>
         synchronized(this) {
             reserved -= ts
+            ready.remove(ts)?.let { return it }
             val existing = ring.firstOrNull { it.timestamp == ts }
             if (existing != null) { ring.remove(existing); return CapturedFrame.from(existing) }
             d = waiting.getOrPut(ts) { CompletableDeferred() }
@@ -135,11 +141,16 @@ class FrameBuffer(private val capacity: Int) {
     @Synchronized
     fun size(): Int = ring.size
 
+    /** Fotogramas del anillo posteriores a [ts]. */
+    @Synchronized
+    fun countNewerThan(ts: Long): Int = ring.count { it.timestamp > ts }
+
     @Synchronized
     fun clear() {
         ring.forEach { runCatching { it.close() } }
         ring.clear()
         reserved.clear()
+        ready.clear()
         waiting.values.forEach { it.cancel() }
         waiting.clear()
     }

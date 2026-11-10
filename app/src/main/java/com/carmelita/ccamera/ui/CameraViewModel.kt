@@ -260,8 +260,14 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     /** La interfaz avisa de cualquier toque en pantalla: reanuda la cámara si estaba en reposo. */
     fun onUserInteraction() {
         lastInteractionMs = System.currentTimeMillis()
-        if (controller.streamPaused) viewModelScope.launch { camMutex.withLock { controller.setStreamPaused(false) } }
+        // Una sola reanudación aunque lleguen muchos eventos (p. ej. al deslizar).
+        if (controller.streamPaused && resuming.compareAndSet(false, true)) {
+            viewModelScope.launch {
+                try { camMutex.withLock { controller.setStreamPaused(false) } } finally { resuming.set(false) }
+            }
+        }
     }
+    private val resuming = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /**
      * Reposo para ahorrar batería: tras [IDLE_PAUSE_MS] sin tocar la pantalla en un modo de foto,
@@ -275,7 +281,14 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 val busy = s.capturing || s.bursting || s.panoActive || s.countdown > 0 || s.recording || s.processing > 0
                 if (s.mode.isVideo || busy || !controller.isOpen || controller.streamPaused) continue
                 if (System.currentTimeMillis() - lastInteractionMs > IDLE_PAUSE_MS) {
-                    camMutex.withLock { if (controller.isOpen) controller.setStreamPaused(true) }
+                    camMutex.withLock {
+                        // Se vuelve a comprobar dentro del bloqueo: pudo empezar una foto mientras esperaba.
+                        val now = _state.value
+                        val stillIdle = System.currentTimeMillis() - lastInteractionMs > IDLE_PAUSE_MS &&
+                            !(now.capturing || now.bursting || now.panoActive || now.countdown > 0 || now.recording) &&
+                            !now.mode.isVideo
+                        if (stillIdle && controller.isOpen) controller.setStreamPaused(true)
+                    }
                 }
             }
         }
@@ -795,11 +808,6 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         if (controller.activeExtension != null && Build.VERSION.SDK_INT >= 31) { takeExtensionPhoto(s, rotation); return }
 
         viewModelScope.launch(Dispatchers.Default) {
-            // Si la cámara estaba en reposo, se reanuda y se espera a tener fotogramas ZSL (~7 a 30 fps).
-            if (controller.streamPaused) {
-                camMutex.withLock { controller.setStreamPaused(false) }
-                delay(240)
-            }
             val t0 = System.currentTimeMillis()
             var job: PhotoJob? = null
             var liveClip: Deferred<Pair<File, Long>?>? = null
@@ -826,6 +834,13 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 val picker = ReferencePicker(enabled = photoStabilization(s)) { f, r -> j.add(f, r) }
 
                 camMutex.withLock {
+                    // En reposo: se reanuda dentro del bloqueo (el bucle de reposo no puede volver a
+                    // pausar entre medias) y se espera a tener los fotogramas ZSL de la foto.
+                    if (controller.streamPaused) {
+                        controller.setStreamPaused(false)
+                        val since = controller.lastResult?.get(CaptureResult.SENSOR_TIMESTAMP) ?: 0L
+                        if (info.zsl) controller.awaitFreshFrames(since, photoFrames, 700) else delay(150)
+                    }
                     when {
                         flashNeeded -> {
                             kind = "Flash"
@@ -846,13 +861,19 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                         else -> {
                             kind = when (s.mode) { CaptureMode.PORTRAIT -> "Retrato"; CaptureMode.PRO -> "Pro"; else -> "Foto" }
                             // Que el foco esté hecho antes de tomar los fotogramas (no añade espera si ya lo está).
-                            val focusLocked = controller.ensureFocus()
-                            val zsl = if (info.zsl) controller.frames.takeLatest(photoFrames) else emptyList()
+                            val focusLockedAt = controller.ensureFocus(photoFrames)
+                            try {
+                            // Si hubo que forzar el enfoque, sólo fotogramas posteriores al bloqueo.
+                            val zsl = if (info.zsl) controller.frames.takeLatest(photoFrames)
+                                .filter { focusLockedAt == null || it.timestamp > focusLockedAt } else emptyList()
                             if (zsl.size >= 2) {
                                 kind += " ZSL"
                                 val shutterUs = zsl.first().timestamp / 1000
                                 val lr = controller.liveRecorder
-                                if (lr != null && s.mode == CaptureMode.PHOTO && s.livePhoto) {
+                                // Recién salido del reposo el vídeo de Fotos en vivo no tiene los 1,5 s
+                                // previos: se guarda la foto sin vídeo en vez de un clip cortado.
+                                val liveReady = System.currentTimeMillis() - controller.resumedAtMs > 1_800
+                                if (lr != null && s.mode == CaptureMode.PHOTO && s.livePhoto && liveReady) {
                                     val file = File(getApplication<Application>().cacheDir, "live_${System.currentTimeMillis()}.mp4")
                                     liveClip = async(Dispatchers.IO) { runCatching { lr.export(shutterUs, file, rotation) }.getOrNull() }
                                 }
@@ -865,7 +886,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                                 }
                             }
                             picker.finish()   // antes del frame corto: la referencia tiene que ir primero
-                            if (focusLocked) controller.releaseFocusLock()
+                            } finally {
+                                // Siempre se vuelve al AF continuo (aunque la captura falle).
+                                if (focusLockedAt != null) controller.releaseFocusLock()
+                            }
                             // El momento ya está captado: se libera el disparador mientras se toma el
                             // frame corto del Smart HDR (la siguiente foto espera al bloqueo de la cámara).
                             _state.update { it.copy(capturing = false) }

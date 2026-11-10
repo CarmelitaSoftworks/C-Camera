@@ -456,13 +456,26 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
     // Enfoque en dominio raíz cuadrada (≈ perceptual): en lineal, los bordes de alto contraste
     // (ventana vs. interior) generarían anillos oscuros y franjas de color.
     float sigma = m.residualSigma() * p.exposure;
-    for (auto& pl : P) {
-        Plane sq(pl.w, pl.h);
-        for (size_t i = 0; i < sq.d.size(); i++) sq.d[i] = std::sqrt(std::max(pl.d[i], 0.f));
-        float sqSigma = sigma / (2.f * std::sqrt(0.18f));   // d(sqrt x) = dx / (2 sqrt x) a nivel medio
-        // Ruido de luma que queda tras la fusión (noche: luego lo amplifica el brillo automático).
-        // Sólo por encima de un umbral: con luz no cambia nada.
-        if (sqSigma > 1.5f / 255.f) sq = bilateral5(sq, 2.5f * sqSigma);
+    float sqSigma = sigma / (2.f * std::sqrt(0.18f));   // d(sqrt x) = dx / (2 sqrt x) a nivel medio
+    std::vector<Plane> SQ(P.size());
+    for (size_t c = 0; c < P.size(); c++) {
+        SQ[c] = Plane(P[c].w, P[c].h);
+        for (size_t i = 0; i < SQ[c].d.size(); i++) SQ[c].d[i] = std::sqrt(std::max(P[c].d[i], 0.f));
+    }
+    // Ruido de luma que queda tras la fusión (noche: luego lo amplifica el brillo automático), sólo
+    // por encima de un umbral (con luz no cambia nada). Se filtra la luma común de los 4 planos y se
+    // suma la misma corrección a todos: filtrar cada plano por separado dejaba diferencias G1/G2
+    // independientes que tras el demosaico se ven como un laberinto de color.
+    if (sqSigma > 1.5f / 255.f && SQ.size() == 4) {
+        Plane L(pw, ph);
+        for (size_t i = 0; i < L.d.size(); i++) L.d[i] = 0.25f * (SQ[0].d[i] + SQ[1].d[i] + SQ[2].d[i] + SQ[3].d[i]);
+        Plane Lf = bilateral5(L, 2.5f * sqSigma);
+        for (auto& sq : SQ)
+            for (size_t i = 0; i < sq.d.size(); i++) sq.d[i] = std::max(sq.d[i] + (Lf.d[i] - L.d[i]), 0.f);
+    }
+    for (size_t c = 0; c < P.size(); c++) {
+        Plane& pl = P[c];
+        Plane& sq = SQ[c];
         sharpenPlane(sq, sqSigma, p.sharpen * 0.8f);
         // Textura a escala media (~1/500 del ancho del mosaico): da el aspecto "detallado".
         texturePlane(sq, std::max(2, pw / 500), 0.45f * p.sharpen, sqSigma * 1.2f);
@@ -472,6 +485,7 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
             pl.d[i] = std::min(std::max(v * v, pl.d[i] * 0.65f), pl.d[i] * 1.35f + 1e-4f);
         }
     }
+    SQ.clear();
     {
         // Ruido de color: diferencias de color en raíz cuadrada, suavizadas con un filtro guiado
         // por la luma (no cruza bordes: sin halos de color alrededor de luces fuertes).

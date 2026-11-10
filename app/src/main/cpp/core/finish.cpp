@@ -591,10 +591,25 @@ void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, 
     Plane& Y = m.planes[0];
     float sigma = m.residualSigma();
     if (sigma > 1.5f / 255.f) Y = bilateral5(Y, 2.5f * sigma);
+    // Ruido de color: con ISO alto (cámara frontal a ISO 3200) salían manchas de colores en la
+    // piel. Filtro guiado por la luma a la resolución del croma: quita las manchas sin cruzar bordes.
+    Plane U, V;
+    {
+        float cs = sigma * 255.f;
+        if (cs > 1.2f) {
+            Plane yd = resizeBilinear(Y, m.planes[1].w, m.planes[1].h);
+            int r = std::max(2, m.planes[1].w / (cs > 4.f ? 100 : 220));
+            float eps = std::max(1e-4f, 6.f * sigma * sigma);
+            U = guidedFilter(yd, m.planes[1], r, eps);
+            V = guidedFilter(yd, m.planes[2], r, eps);
+        } else {
+            U = blur(m.planes[1], 1);
+            V = blur(m.planes[2], 1);
+        }
+    }
+    // El YUV ya viene procesado por el ISP: menos realce de textura que en RAW (amplificaba el ruido).
     sharpenPlane(Y, sigma, p.sharpen);
-    texturePlane(Y, std::max(2, Y.w / 1000), 0.45f * p.sharpen, sigma * 1.2f);
-    int passes = sigma > 2.f / 255.f ? 2 : 1;
-    Plane U = blur(m.planes[1], passes), V = blur(m.planes[2], passes);
+    texturePlane(Y, std::max(2, Y.w / 1000), 0.2f * p.sharpen, sigma * 1.5f);
     bool hasShort = !m.shortPlanes.empty();
     int w = Y.w, h = Y.h;
 

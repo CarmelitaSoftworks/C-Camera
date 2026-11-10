@@ -813,6 +813,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                         }
                         else -> {
                             kind = when (s.mode) { CaptureMode.PORTRAIT -> "Retrato"; CaptureMode.PRO -> "Pro"; else -> "Foto" }
+                            // Que el foco esté hecho antes de tomar los fotogramas (no añade espera si ya lo está).
+                            val focusLocked = controller.ensureFocus()
                             val zsl = if (info.zsl) controller.frames.takeLatest(photoFrames) else emptyList()
                             if (zsl.size >= 2) {
                                 kind += " ZSL"
@@ -831,6 +833,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                                 }
                             }
                             picker.finish()   // antes del frame corto: la referencia tiene que ir primero
+                            if (focusLocked) controller.releaseFocusLock()
                             // El momento ya está captado: se libera el disparador mientras se toma el
                             // frame corto del Smart HDR (la siguiente foto espera al bloqueo de la cámara).
                             _state.update { it.copy(capturing = false) }
@@ -862,7 +865,9 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                     // del motor hace el resto).
                     // Noche: algo más de brillo (la del vivo queda en mediana ~0,14 en la misma escena).
                     exposure = when { autoNight -> 1.6f; night -> 1.3f; else -> 1f },
-                    saturation = when { aeIso >= 3200 -> 1.3f; aeIso >= 1600 -> 1.2f; aeIso >= 800 -> 1.1f; else -> 1f },
+                    // Más saturación con ISO alto sólo en RAW: en YUV el croma ya viene del ISP y subirla
+                    // amplificaba el ruido de color (retrato frontal a ISO 3200 con manchas de colores).
+                    saturation = if (!info.raw) 1f else when { aeIso >= 3200 -> 1.3f; aeIso >= 1600 -> 1.2f; aeIso >= 800 -> 1.1f; else -> 1f },
                     ultraHdr = caps.ultraHdr && s.ultraHdrOn,
                     autoBrightness = !manualExp,
                 )

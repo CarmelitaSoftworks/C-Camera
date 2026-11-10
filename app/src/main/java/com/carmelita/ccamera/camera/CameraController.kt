@@ -587,7 +587,14 @@ class CameraController(private val context: Context) {
             }
             if (info?.zsl == true && info.raw.not()) {
                 // ZSL en YUV: el ISP usa su modo pensado para ZSL (menos procesado por frame).
-                set3(b, CaptureRequest.NOISE_REDUCTION_MODE, caps.nrModes, CameraMetadata.NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG, CameraMetadata.NOISE_REDUCTION_MODE_FAST)
+                // Con ISO alto se deja al ISP quitar ruido (FAST): con el modo ZSL (casi sin reducción)
+                // la cámara frontal a ISO 3200 daba demasiado ruido para fusionar sólo 4-6 fotogramas.
+                val highIso = (lastResult?.get(CaptureResult.SENSOR_SENSITIVITY) ?: 0) >= 1600
+                if (highIso) {
+                    set3(b, CaptureRequest.NOISE_REDUCTION_MODE, caps.nrModes, CameraMetadata.NOISE_REDUCTION_MODE_FAST, CameraMetadata.NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG)
+                } else {
+                    set3(b, CaptureRequest.NOISE_REDUCTION_MODE, caps.nrModes, CameraMetadata.NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG, CameraMetadata.NOISE_REDUCTION_MODE_FAST)
+                }
                 set3(b, CaptureRequest.EDGE_MODE, caps.edgeModes, CameraMetadata.EDGE_MODE_ZERO_SHUTTER_LAG, CameraMetadata.EDGE_MODE_FAST)
             }
         } else {
@@ -727,17 +734,75 @@ class CameraController(private val context: Context) {
         )
         focusRegions = arrayOf(MeteringRectangle(rect, MeteringRectangle.METERING_WEIGHT_MAX - 1))
         aeAfLocked = false
-        runCatching {
-            val trigger = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                addTarget(surface); apply3A(this, false)
-                set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
-            }
-            s.capture(trigger.build(), null, handler)
-        }
+        // Primero la repetición con el modo AUTO y la región; luego CANCEL (suelta un enfoque
+        // bloqueado anterior: si no, algunos teléfonos ignoran el nuevo) y START en la región.
         updateRepeating()
+        runCatching {
+            fun trigger(t: Int) = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(surface); apply3A(this, false)
+                set(CaptureRequest.CONTROL_AF_TRIGGER, t)
+            }.build()
+            s.capture(trigger(CameraMetadata.CONTROL_AF_TRIGGER_CANCEL), null, handler)
+            s.capture(trigger(CameraMetadata.CONTROL_AF_TRIGGER_START), null, handler)
+        }.onFailure { Log.w(TAG, "Enfoque al tocar", it) }
         if (lock) {
             // El AE converge en la región antes de bloquearse.
             handler.postDelayed({ aeAfLocked = true; updateRepeating() }, 600)
+        }
+    }
+
+    /**
+     * Antes de la foto: si el autoenfoque continuo está buscando, se espera a que termine; si no
+     * consiguió enfocar, se fuerza un enfoque (como las cámaras de fábrica). Con buena luz y foco
+     * ya hecho no añade espera. Devuelve true si dejó el foco bloqueado (llamar a [releaseFocusLock]).
+     */
+    suspend fun ensureFocus(): Boolean {
+        if (!caps.hasAutofocus || focusRegions != null || pro?.focusDiopters != null) return false
+        val s = session ?: return false
+        val dev = device ?: return false
+        val surface = previewSurface ?: return false
+        fun afState() = lastResult?.get(CaptureResult.CONTROL_AF_STATE)
+        // 1) Buscando: esperar un poco a que termine.
+        val t0 = System.currentTimeMillis()
+        while (System.currentTimeMillis() - t0 < 500) {
+            val st = afState() ?: return false
+            if (st != CameraMetadata.CONTROL_AF_STATE_PASSIVE_SCAN && st != CameraMetadata.CONTROL_AF_STATE_ACTIVE_SCAN) break
+            delay(25)
+        }
+        val st = afState()
+        val focused = st == CameraMetadata.CONTROL_AF_STATE_PASSIVE_FOCUSED ||
+            st == CameraMetadata.CONTROL_AF_STATE_FOCUSED_LOCKED
+        if (focused) return false
+        // 2) Sin foco (o inactivo): enfoque forzado con el disparador de AF y esperar el bloqueo.
+        runCatching {
+            val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(surface); apply3A(this, false)
+                set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+            }.build()
+            s.capture(req, null, handler)
+        }.onFailure { return false }
+        val t1 = System.currentTimeMillis()
+        while (System.currentTimeMillis() - t1 < 900) {
+            val now = afState()
+            if (now == CameraMetadata.CONTROL_AF_STATE_FOCUSED_LOCKED || now == CameraMetadata.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) break
+            delay(25)
+        }
+        // Un par de fotogramas más para que el anillo ZSL tenga fotogramas ya enfocados.
+        delay(70)
+        return true
+    }
+
+    /** Vuelve al autoenfoque continuo tras [ensureFocus]. */
+    fun releaseFocusLock() {
+        val s = session ?: return
+        val dev = device ?: return
+        val surface = previewSurface ?: return
+        runCatching {
+            val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                addTarget(surface); apply3A(this, false)
+                set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_CANCEL)
+            }.build()
+            s.capture(req, null, handler)
         }
     }
 

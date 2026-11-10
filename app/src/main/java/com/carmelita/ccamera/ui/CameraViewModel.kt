@@ -321,7 +321,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             val ext = desiredExtension(s, caps)
             val extOk = ext != null && Build.VERSION.SDK_INT >= 31 && controller.startExtensionSession(t, ext)
-            if (extOk && ext != null) {
+            if (extOk) {
                 _state.update {
                     it.copy(
                         liveActive = false, rawActive = false, zslActive = false, extActive = ext,

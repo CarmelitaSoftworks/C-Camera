@@ -11,12 +11,6 @@ fotos lo mejor posible.
 
 Kotlin · Camera2 · Jetpack Compose · motor de imagen en C++ (NDK) · OpenGL ES · ML Kit · minSdk 26
 
-![Comparación](docs/comparacion.png)
-
-*Ráfaga RAW sintética de prueba: a la izquierda, un frame revelado directamente; a la derecha, el
-pipeline completo. Las sombras ganan +7 dB de señal/ruido, la ventana quemada recupera su textura y
-el objeto en movimiento no deja fantasmas.*
-
 ## Modos
 
 | Modo | Qué hace |
@@ -67,8 +61,6 @@ Desde el visor de la última foto, **Instagram** prepara una copia y abre la app
   4:5, 1:1 e Historia 9:16 (sobre fondo desenfocado).
 - **Reducción Lanczos en luz lineal** + un enfoque de salida suave que compensa la recompresión.
 - **JPEG de calidad 95**, **Ultra HDR conservado** y sin ubicación.
-
-![Retrato e historia](docs/retrato_historia.png)
 
 ## Arquitectura
 

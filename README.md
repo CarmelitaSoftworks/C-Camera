@@ -10,12 +10,6 @@ Portrait, Night, Pro, Panorama, 4K Video, Slow motion and Time-lapse** modes, it
 
 Kotlin · Camera2 · Jetpack Compose · C++ image engine (NDK) · OpenGL ES · ML Kit · minSdk 26
 
-![Comparison](docs/comparacion.png)
-
-*Synthetic RAW test burst: on the left, a single frame developed directly; on the right, the full
-pipeline. Shadows gain +7 dB signal-to-noise, the blown-out window recovers its texture and the moving
-object leaves no ghosts.*
-
 ## Modes
 
 | Mode | What it does |
@@ -64,8 +58,6 @@ From the last-photo viewer, **Instagram** prepares a copy and opens the app:
   blurred background).
 - **Lanczos downscaling in linear light** + gentle output sharpening that compensates for recompression.
 - **Quality-95 JPEG**, **Ultra HDR preserved** and no location.
-
-![Portrait and story](docs/retrato_historia.png)
 
 ## Architecture
 

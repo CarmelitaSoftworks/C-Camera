@@ -10,12 +10,6 @@ de QR** e uma exportação pensada para que o **Instagram** mostre suas fotos da
 
 Kotlin · Camera2 · Jetpack Compose · motor de imagem em C++ (NDK) · OpenGL ES · ML Kit · minSdk 26
 
-![Comparação](docs/comparacion.png)
-
-*Rajada RAW sintética de teste: à esquerda, um quadro revelado diretamente; à direita, o pipeline
-completo. As sombras ganham +7 dB de sinal/ruído, a janela estourada recupera a textura e o objeto em
-movimento não deixa fantasmas.*
-
 ## Modos
 
 | Modo | O que faz |
@@ -65,8 +59,6 @@ No visualizador da última foto, **Instagram** prepara uma cópia e abre o app:
   (sobre fundo desfocado).
 - **Redução Lanczos em luz linear** + uma nitidez de saída suave que compensa a recompressão.
 - **JPEG de qualidade 95**, **Ultra HDR preservado** e sem localização.
-
-![Retrato e story](docs/retrato_historia.png)
 
 ## Arquitetura
 

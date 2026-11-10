@@ -804,7 +804,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                             kind = if (autoNight) "Noche auto" else "Noche"
                             controller.frames.setPaused(true)
                             try {
-                                val (reqs, t) = controller.nightRequests(nightFrames)
+                                val (reqs, t) = controller.nightRequests(nightFrames, if (autoNight) 12 else 8)
                                 controller.capture(reqs, 3_000 + (t ?: 0L) / 1_000_000L * 3) { f, r, i ->
                                     picker.offer(f, r); progress((i + 1f) / nightFrames)
                                 }
@@ -855,7 +855,9 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 val manualExp = s.mode == CaptureMode.PRO && s.pro.iso != null && s.pro.exposureNs != null
                 val params = DevelopParams(
                     style = s.style, smartHdr = s.smartHdr,
-                    sharpen = when { night -> 0.5f; kind == "Flash" -> 0.6f; else -> 0.7f },
+                    // Noche con el mismo enfoque que de día: la fusión de 5-8 fotogramas ya quita el ruido
+                    // (con 0,5 el gato salía con ~1,8x menos textura que en la cámara de fábrica).
+                    sharpen = when { kind == "Flash" -> 0.6f; else -> 0.7f },
                     // La noche automática aclara algo más (la escena estaba oscura; el brillo automático
                     // del motor hace el resto).
                     // Noche: algo más de brillo (la del vivo queda en mediana ~0,14 en la misma escena).

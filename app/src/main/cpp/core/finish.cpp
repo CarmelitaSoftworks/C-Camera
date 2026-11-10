@@ -507,8 +507,10 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
         // Escena oscura (mucha ganancia total): punto negro y contraste más suaves. Con el punto
         // negro de interiores (0,012) una foto de noche quedaba casi negra (mediana 0,04).
         float total = field.autoGain * std::max(p.exposure, 1.f);
-        rd.black = std::min(0.012f, std::max(0.0015f, 0.012f / (total * total)));
-        if (total > 1.5f) rd.contrast *= 0.8f;
+        // Proporcional (no cuadrático): con 0,0015 los negros del gato de noche salían más claros
+        // que en la cámara de fábrica (0,15 frente a 0,11).
+        rd.black = std::min(0.012f, std::max(0.004f, 0.012f / total));
+        if (total > 1.5f) rd.contrast *= 0.9f;
     }
     {
         // Tinte residual del balance de blancos del teléfono (p. ej. pared blanca amarilla con bombilla).
@@ -635,8 +637,10 @@ void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, 
         // Escena oscura (mucha ganancia total): punto negro y contraste más suaves. Con el punto
         // negro de interiores (0,012) una foto de noche quedaba casi negra (mediana 0,04).
         float total = field.autoGain * std::max(p.exposure, 1.f);
-        rd.black = std::min(0.012f, std::max(0.0015f, 0.012f / (total * total)));
-        if (total > 1.5f) rd.contrast *= 0.8f;
+        // Proporcional (no cuadrático): con 0,0015 los negros del gato de noche salían más claros
+        // que en la cámara de fábrica (0,15 frente a 0,11).
+        rd.black = std::min(0.012f, std::max(0.004f, 0.012f / total));
+        if (total > 1.5f) rd.contrast *= 0.9f;
     }
     {
         // Tinte residual del balance de blancos del teléfono (p. ej. pared blanca amarilla con bombilla).

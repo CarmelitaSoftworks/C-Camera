@@ -847,7 +847,7 @@ class CameraController(private val context: Context) {
      * Ráfaga de noche: exposiciones largas e ISO bajo con la misma luz total que el AE x 2^ev.
      * Sin control manual, usa el AE bloqueado.
      */
-    fun nightRequests(count: Int): Pair<List<CaptureRequest>, Long?> {
+    fun nightRequests(count: Int, maxShutterDiv: Int = 8): Pair<List<CaptureRequest>, Long?> {
         val exp = currentExposure()
         val ir = caps.isoRange
         var usedT: Long? = null
@@ -858,7 +858,9 @@ class CameraController(private val context: Context) {
                 // Más luz real que la vista previa (+1,3 EV): menos ruido que subirla después.
                 // Referencia: la cámara de fábrica de un vivo V30 captó ~11x más luz en la misma escena.
                 val product = t0.toDouble() * iso0 * 2.5
-                val maxT = 1_000_000_000.0 / 8                 // 1/8 s a pulso con OIS (menos trepidación de sujetos)
+                // Tiempo máximo a pulso con OIS: 1/8 s en Noche; la noche automática usa 1/12 s
+                // (personas y animales se mueven: el vivo usó 1/14 s con un gato en la misma escena).
+                val maxT = 1_000_000_000.0 / maxShutterDiv
                 val t = (product / max(ir.lower, 50)).coerceAtMost(if (caps.ois) maxT else maxT / 2).coerceAtLeast(t0.toDouble())
                 val iso = (product / t).roundToInt()
                 b.manualExposure(t.toLong(), iso)

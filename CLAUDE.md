@@ -43,7 +43,12 @@ mensajes al usuario **en español**.
    (comprobar que Google Fotos reconoce el Motion Photo), QR, exportación a Instagram y pantalla
    *Info de cámara* (qué detectó en ese teléfono).
 
-### Procesado del teléfono (modo principal, sin compilar ni probar todavía)
+### Procesado del teléfono (modo principal; en el vivo V30 del usuario NO está disponible)
+
+En el vivo V30 (V2318) Info de cámara muestra "Procesado del teléfono: No": el fabricante no ofrece
+Camera2 Extensions a otras apps, así que allí siempre se usa el motor propio. Datos de ese teléfono:
+RAW 4096x3072 con ZSL, LEVEL 3, ISO manual 50-3188 (la cámara de fábrica llega a ~17 000 con ganancia
+del firmware), OIS sí, EIS del teléfono no, cámara lenta 1080p a 240 fps.
 
 Por decisión del usuario, Foto/Noche/Retrato usan primero el procesado del propio teléfono
 (Camera2 Extensions: Automático/HDR, Noche, Retrato) si la cámara lo ofrece; si no, o si se

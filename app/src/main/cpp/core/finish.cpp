@@ -25,6 +25,8 @@ namespace {
 
 struct Renderer {
     float warmR, warmB, contrast, vib, satMul;
+    /** Punto negro (lineal). Se baja en escenas oscuras: ahí la imagen apenas pasa del negro. */
+    float black = 0.012f;
     explicit Renderer(Style s, float saturation = 1.f) : satMul(saturation) {
         StyleParams p = styleParams(s);
         warmR = 1.f + 0.06f * p.warmth;
@@ -40,8 +42,6 @@ struct Renderer {
     void sdr(float r, float g, float b, float* o) const {
         r *= warmR; b *= warmB;
         // Punto negro: el ISP del teléfono deja los negros en negro; sin esto las sombras salen lavadas.
-        // Calibrado con fotos de la cámara de fábrica (vivo V30): negros a ~0 en interiores.
-        const float black = 0.012f;
         r = std::max(r - black, 0.f) * (1.f + black);
         g = std::max(g - black, 0.f) * (1.f + black);
         b = std::max(b - black, 0.f) * (1.f + black);
@@ -176,6 +176,8 @@ LowRes downsampleRgb(const Plane& r, const Plane& g, const Plane& b, int maxSide
 /** Mapa de ganancia local + luma de baja resolución (para el reescalado conjunto). */
 struct GainField {
     Plane gain, logLum;
+    /** Ganancia del brillo automático aplicada (>= 1; alta = escena oscura). */
+    float autoGain = 1.f;
     /**
      * Ganancia en un píxel de salida: reescalado bilateral conjunto (los 4 vecinos de baja
      * resolución pesan según se parezca su luma a la del píxel). Evita bordes oscuros finos
@@ -289,6 +291,7 @@ GainField makeField(const LowRes& lr, const FinishParams& p) {
     }
     gf.gain = localGain(lr, p, A);
     for (auto& v : gf.gain.d) v *= A;
+    gf.autoGain = A;
     gf.logLum = Plane(lr.r.w, lr.r.h);
     for (size_t i = 0; i < gf.logLum.d.size(); i++)
         gf.logLum.d[i] = std::log(std::max(0.2126f * lr.r.d[i] + 0.7152f * lr.g.d[i] + 0.0722f * lr.b.d[i], 1e-4f));
@@ -501,6 +504,13 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
     const Plane& gain = field.gain;
     Renderer rd(p.style, p.saturation);
     {
+        // Escena oscura (mucha ganancia total): punto negro y contraste más suaves. Con el punto
+        // negro de interiores (0,012) una foto de noche quedaba casi negra (mediana 0,04).
+        float total = field.autoGain * std::max(p.exposure, 1.f);
+        rd.black = std::min(0.012f, std::max(0.0015f, 0.012f / (total * total)));
+        if (total > 1.5f) rd.contrast *= 0.8f;
+    }
+    {
         // Tinte residual del balance de blancos del teléfono (p. ej. pared blanca amarilla con bombilla).
         float cr, cb;
         whiteBalanceFix(lr.r.d, lr.g.d, lr.b.d, cr, cb);
@@ -621,6 +631,13 @@ void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, 
     GainField field = makeField(lr, p);
     const Plane& gain = field.gain;
     Renderer rd(p.style, p.saturation);
+    {
+        // Escena oscura (mucha ganancia total): punto negro y contraste más suaves. Con el punto
+        // negro de interiores (0,012) una foto de noche quedaba casi negra (mediana 0,04).
+        float total = field.autoGain * std::max(p.exposure, 1.f);
+        rd.black = std::min(0.012f, std::max(0.0015f, 0.012f / (total * total)));
+        if (total > 1.5f) rd.contrast *= 0.8f;
+    }
     {
         // Tinte residual del balance de blancos del teléfono (p. ej. pared blanca amarilla con bombilla).
         float cr, cb;

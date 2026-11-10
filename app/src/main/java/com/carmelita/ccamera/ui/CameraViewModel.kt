@@ -858,7 +858,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                     sharpen = when { night -> 0.5f; kind == "Flash" -> 0.6f; else -> 0.7f },
                     // La noche automática aclara algo más (la escena estaba oscura; el brillo automático
                     // del motor hace el resto).
-                    exposure = when { autoNight -> 1.15f; else -> 1f },
+                    // Noche: algo más de brillo (la del vivo queda en mediana ~0,14 en la misma escena).
+                    exposure = when { autoNight -> 1.6f; night -> 1.3f; else -> 1f },
                     saturation = when { aeIso >= 3200 -> 1.3f; aeIso >= 1600 -> 1.2f; aeIso >= 800 -> 1.1f; else -> 1f },
                     ultraHdr = caps.ultraHdr && s.ultraHdrOn,
                     autoBrightness = !manualExp,

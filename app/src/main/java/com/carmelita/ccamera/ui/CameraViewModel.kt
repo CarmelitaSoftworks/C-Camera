@@ -329,12 +329,16 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             } else {
+                // Si se quería el procesado del teléfono y no arrancó, se dice por qué (y se usa el propio).
+                val extError = if (ext != null) controller.lastExtensionError ?: "no disponible" else null
+                if (extError != null) toast("El procesado del teléfono no arrancó: $extError. Se usa el de C Camera.")
                 val info = controller.startPhotoSession(t, wantLive = s.livePhoto, maxPixels = maxPixels)
                 _state.update {
                     it.copy(
                         liveActive = info.live, rawActive = info.raw, zslActive = info.zsl, extActive = null,
                         sessionSummary = "${if (info.raw) "RAW" else "YUV"} ${info.captureSize.width}×${info.captureSize.height}" +
-                            (if (info.zsl) " · ZSL" else "") + (if (info.live) " · En vivo" else ""),
+                            (if (info.zsl) " · ZSL" else "") + (if (info.live) " · En vivo" else "") +
+                            (if (extError != null) " · procesado del teléfono falló: $extError" else ""),
                     )
                 }
             }

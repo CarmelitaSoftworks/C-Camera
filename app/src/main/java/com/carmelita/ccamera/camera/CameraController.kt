@@ -200,50 +200,80 @@ class CameraController(private val context: Context) {
      * a la máxima resolución que ofrezca. Devuelve false si esta cámara no tiene esa extensión o si
      * la sesión no se pudo crear (el que llama usa entonces el motor propio).
      */
+    /** Motivo del último fallo al iniciar el procesado del teléfono (para mostrarlo), o null. */
+    var lastExtensionError: String? = null
+        private set
+
     @RequiresApi(31)
     suspend fun startExtensionSession(texture: SurfaceTexture, extension: Int): Boolean {
-        val dev = device ?: return false
+        lastExtensionError = null
+        fun fail(why: String): Boolean { lastExtensionError = why; Log.w(TAG, "Procesado del teléfono: $why"); return false }
+        val dev = device ?: return fail("cámara cerrada")
         closeOutputs()
         videoMode = false
-        val ec = runCatching { manager.getCameraExtensionCharacteristics(caps.id) }.getOrNull() ?: return false
-        if (!ec.supportedExtensions.contains(extension)) return false
+        // Algunos fabricantes necesitan que la sesión anterior termine de cerrarse.
+        delay(200)
+        val ec = runCatching { manager.getCameraExtensionCharacteristics(caps.id) }
+            .getOrElse { return fail("no se pudieron leer los modos (${it.message})") }
+        if (!ec.supportedExtensions.contains(extension)) return fail("la cámara ${caps.id} no ofrece este modo")
         val pv = runCatching { ec.getExtensionSupportedSizes(extension, SurfaceTexture::class.java) }.getOrDefault(emptyList())
-        val preview = pv.filter { CameraCapabilities.is43(it) && it.width <= 1920 }.maxByOrNull { it.width * it.height }
-            ?: pv.filter { it.width <= 1920 }.maxByOrNull { it.width * it.height } ?: return false
         val js = runCatching { ec.getExtensionSupportedSizes(extension, ImageFormat.JPEG) }.getOrDefault(emptyList())
-        val still = js.filter { CameraCapabilities.is43(it) }.maxByOrNull { it.width.toLong() * it.height }
-            ?: js.maxByOrNull { it.width.toLong() * it.height } ?: return false
-        texture.setDefaultBufferSize(preview.width, preview.height)
-        previewSurface?.release()
-        val surface = Surface(texture)
-        previewSurface = surface
-        val reader = ImageReader.newInstance(still.width, still.height, ImageFormat.JPEG, 2)
-        val s = suspendCancellableCoroutine<CameraExtensionSession?> { cont ->
-            val cfg = ExtensionSessionConfiguration(
-                extension, listOf(OutputConfiguration(surface), OutputConfiguration(reader.surface)), executor,
-                object : CameraExtensionSession.StateCallback() {
-                    override fun onConfigured(session: CameraExtensionSession) { if (cont.isActive) cont.resume(session) }
-                    override fun onConfigureFailed(session: CameraExtensionSession) { if (cont.isActive) cont.resume(null) }
-                },
-            )
-            try {
-                dev.createExtensionSession(cfg)
-            } catch (e: Exception) {
-                Log.w(TAG, "createExtensionSession", e)
-                if (cont.isActive) cont.resume(null)
+        if (pv.isEmpty() || js.isEmpty()) return fail("el teléfono no indica resoluciones (vista previa ${pv.size}, JPEG ${js.size})")
+        fun area(z: Size) = z.width.toLong() * z.height
+        val preview43 = pv.filter { CameraCapabilities.is43(it) && it.width <= 1920 }.maxByOrNull { area(it) }
+        val previewAny = pv.filter { it.width <= 1920 }.maxByOrNull { area(it) } ?: pv.minByOrNull { area(it) }!!
+        val jpeg43 = js.filter { CameraCapabilities.is43(it) }.sortedByDescending { area(it) }
+        // Combinaciones a probar: la mejor; JPEG 4:3 de ~12 MP; y la más conservadora.
+        val attempts = listOfNotNull(
+            (preview43 ?: previewAny) to (jpeg43.firstOrNull() ?: js.maxByOrNull { area(it) }!!),
+            jpeg43.firstOrNull { area(it) <= 12_600_000L }?.let { (preview43 ?: previewAny) to it },
+            previewAny to js.minByOrNull { kotlin.math.abs(area(it) - 8_000_000L) }!!,
+        ).distinct()
+        val errors = ArrayList<String>()
+        for ((preview, still) in attempts) {
+            texture.setDefaultBufferSize(preview.width, preview.height)
+            previewSurface?.release()
+            val surface = Surface(texture)
+            previewSurface = surface
+            val reader = ImageReader.newInstance(still.width, still.height, ImageFormat.JPEG, 2)
+            var error: String? = null
+            val s = withTimeoutOrNull(5_000) {
+                suspendCancellableCoroutine<CameraExtensionSession?> { cont ->
+                    val cfg = ExtensionSessionConfiguration(
+                        extension, listOf(OutputConfiguration(surface), OutputConfiguration(reader.surface)), executor,
+                        object : CameraExtensionSession.StateCallback() {
+                            override fun onConfigured(session: CameraExtensionSession) { if (cont.isActive) cont.resume(session) }
+                            override fun onConfigureFailed(session: CameraExtensionSession) {
+                                error = "el teléfono rechazó la sesión"
+                                if (cont.isActive) cont.resume(null)
+                            }
+                        },
+                    )
+                    try {
+                        dev.createExtensionSession(cfg)
+                    } catch (e: Exception) {
+                        error = "${e.javaClass.simpleName}: ${e.message}"
+                        if (cont.isActive) cont.resume(null)
+                    }
+                }
             }
+            if (s != null) {
+                extSession = s
+                extReader = reader
+                activeExtension = extension
+                photoInfo = null
+                extKeys = if (Build.VERSION.SDK_INT >= 34) {
+                    runCatching { ec.getAvailableCaptureRequestKeys(extension) }.getOrDefault(emptySet())
+                } else emptySet()
+                Log.i(TAG, "Procesado del teléfono: extensión $extension, vista previa $preview, JPEG $still")
+                updateRepeating()
+                return true
+            }
+            reader.close()
+            errors += "${error ?: "sin respuesta en 5 s"} (JPEG ${still.width}×${still.height})"
+            delay(150)
         }
-        if (s == null) { reader.close(); return false }
-        extSession = s
-        extReader = reader
-        activeExtension = extension
-        photoInfo = null
-        extKeys = if (Build.VERSION.SDK_INT >= 34) {
-            runCatching { ec.getAvailableCaptureRequestKeys(extension) }.getOrDefault(emptySet())
-        } else emptySet()
-        Log.i(TAG, "Sesión con procesado del teléfono: extensión $extension, JPEG ${still.width}x${still.height}")
-        updateRepeating()
-        return true
+        return fail(errors.joinToString("; "))
     }
 
     /** Petición para la sesión de extensión: sólo las claves que el fabricante admite (zoom en Android 14+). */

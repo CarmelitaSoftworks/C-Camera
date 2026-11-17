@@ -280,15 +280,28 @@ float autoBrightnessGain(const std::vector<float>& lum, bool smartHdr, float max
 
 namespace {
 
+/** Ganancia del brillo automático para una imagen lineal de baja resolución. */
+float estimateAutoGain(const LowRes& lr, const FinishParams& p) {
+    if (!p.autoBrightness) return 1.f;
+    std::vector<float> lum(lr.r.d.size());
+    for (size_t i = 0; i < lum.size(); i++)
+        lum[i] = 0.2126f * lr.r.d[i] + 0.7152f * lr.g.d[i] + 0.0722f * lr.b.d[i];
+    return autoBrightnessGain(lum, p.smartHdr, p.maxAutoGain);
+}
+
+/**
+ * Cuánto crece el ruido (en gamma o en raíz cuadrada) con la ganancia que se aplica después de
+ * filtrar: brillo automático y exposición (k lineal -> ruido ~k^0,45). Con [withHdr], el Smart HDR
+ * levanta las sombras hasta x1,8 (y oscurece las luces): se cuenta x1,5 como término medio.
+ */
+float noiseAmp(float autoGain, const FinishParams& p, bool withHdr) {
+    float total = autoGain * std::max(p.exposure, 1.f) * (withHdr && p.smartHdr ? 1.5f : 1.f);
+    return std::min(std::max(std::pow(total, 0.45f), 1.f), 2.5f);
+}
+
 GainField makeField(const LowRes& lr, const FinishParams& p) {
     GainField gf;
-    float A = 1.f;
-    if (p.autoBrightness) {
-        std::vector<float> lum(lr.r.d.size());
-        for (size_t i = 0; i < lum.size(); i++)
-            lum[i] = 0.2126f * lr.r.d[i] + 0.7152f * lr.g.d[i] + 0.0722f * lr.b.d[i];
-        A = autoBrightnessGain(lum, p.smartHdr, p.maxAutoGain);
-    }
+    float A = estimateAutoGain(lr, p);
     gf.gain = localGain(lr, p, A);
     for (auto& v : gf.gain.d) v *= A;
     gf.autoGain = A;
@@ -389,6 +402,18 @@ Plane bilateral5(const Plane& p, float sigmaR) {
     return o;
 }
 
+/**
+ * Grano grueso: mezcla hacia un filtro guiado por la propia imagen (aplana zonas lisas, conserva
+ * bordes). [rs] = ruido real del plano (fija la suavidad), [se] = ruido efectivo en la salida
+ * (decide cuánto se mezcla; nada por debajo de 4/255).
+ */
+void smoothFlat(Plane& pl, int r, float rs, float se) {
+    if (se <= 4.f / 255.f) return;
+    Plane sm = guidedFilter(pl, pl, r, (1.6f * rs) * (1.6f * rs));
+    float mix = std::min(1.f, (se * 255.f - 4.f) / 6.f) * 0.8f;
+    for (size_t i = 0; i < pl.d.size(); i++) pl.d[i] += (sm.d[i] - pl.d[i]) * mix;
+}
+
 // ---------------- RAW ----------------
 
 void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
@@ -457,6 +482,39 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
     // (ventana vs. interior) generarían anillos oscuros y franjas de color.
     float sigma = m.residualSigma() * p.exposure;
     float sqSigma = sigma / (2.f * std::sqrt(0.18f));   // d(sqrt x) = dx / (2 sqrt x) a nivel medio
+    const float* M = md.ccm;
+    // El brillo automático y el Smart HDR aclaran después de filtrar y multiplican el ruido que
+    // quede (de noche salía grano y manchas de color). La ganancia se estima en una vista previa muy
+    // reducida (bloques grandes, ya promediados); el revelado de verdad se mide después, sin ruido.
+    float autoGain = 1.f;
+    if (p.autoBrightness) {
+        int f = std::max(1, int(std::ceil(std::max(pw, ph) / 256.f)));
+        int lw = pw / f, lh = ph / f, st = std::min(2, f);
+        LowRes pre{Plane(lw, lh), Plane(lw, lh), Plane(lw, lh)};
+        parallelFor(lh, [&](int y0, int y1) {
+            for (int y = y0; y < y1; y++)
+                for (int x = 0; x < lw; x++) {
+                    float r = 0, g = 0, b = 0;
+                    int n = 0;
+                    for (int dy = 0; dy < f; dy += st)
+                        for (int dx = 0; dx < f; dx += st) {
+                            int xx = x * f + dx, yy = y * f + dy;
+                            r += P[0].at(xx, yy); g += 0.5f * (P[1].at(xx, yy) + P[2].at(xx, yy)); b += P[3].at(xx, yy);
+                            n++;
+                        }
+                    r /= n; g /= n; b /= n;
+                    pre.r.at(x, y) = M[0] * r + M[1] * g + M[2] * b;
+                    pre.g.at(x, y) = M[3] * r + M[4] * g + M[5] * b;
+                    pre.b.at(x, y) = M[6] * r + M[7] * g + M[8] * b;
+                }
+        });
+        autoGain = estimateAutoGain(pre, p);
+    }
+    // En raíz cuadrada la ganancia k sube el ruido ~k^0,5 (parecido al k^0,45 de gamma).
+    float ampBase = noiseAmp(autoGain, p, false);
+    float amp = noiseAmp(autoGain, p, true);
+    float sqSe = sqSigma * amp;                  // ruido efectivo en la salida (decide qué filtrar)
+    float sqRs = sqSigma * std::sqrt(amp);       // rango de los filtros (sobre la imagen sin aclarar)
     std::vector<Plane> SQ(P.size());
     for (size_t c = 0; c < P.size(); c++) {
         SQ[c] = Plane(P[c].w, P[c].h);
@@ -466,19 +524,21 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
     // por encima de un umbral (con luz no cambia nada). Se filtra la luma común de los 4 planos y se
     // suma la misma corrección a todos: filtrar cada plano por separado dejaba diferencias G1/G2
     // independientes que tras el demosaico se ven como un laberinto de color.
-    if (sqSigma > 1.5f / 255.f && SQ.size() == 4) {
+    if (sqSe > 1.5f / 255.f && SQ.size() == 4) {
         Plane L(pw, ph);
         for (size_t i = 0; i < L.d.size(); i++) L.d[i] = 0.25f * (SQ[0].d[i] + SQ[1].d[i] + SQ[2].d[i] + SQ[3].d[i]);
-        Plane Lf = bilateral5(L, 2.5f * sqSigma);
+        Plane Lf = bilateral5(L, 2.5f * sqRs);
+        if (amp > 1.2f) smoothFlat(Lf, std::max(2, pw / 600), sqRs, sqSe);   // con luz, sin cambios
         for (auto& sq : SQ)
             for (size_t i = 0; i < sq.d.size(); i++) sq.d[i] = std::max(sq.d[i] + (Lf.d[i] - L.d[i]), 0.f);
     }
     for (size_t c = 0; c < P.size(); c++) {
         Plane& pl = P[c];
         Plane& sq = SQ[c];
-        sharpenPlane(sq, sqSigma, p.sharpen * 0.8f);
-        // Textura a escala media (~1/500 del ancho del mosaico): da el aspecto "detallado".
-        texturePlane(sq, std::max(2, pw / 500), 0.45f * p.sharpen, sqSigma * 1.2f);
+        sharpenPlane(sq, sqSe, p.sharpen * 0.8f / ampBase);
+        // Textura a escala media (~1/500 del ancho del mosaico): da el aspecto "detallado". Menos
+        // cuanto más se aclara la foto (sólo realzaría el grano).
+        texturePlane(sq, std::max(2, pw / 500), 0.45f * p.sharpen / ampBase, sqSe * 1.2f);
         for (size_t i = 0; i < sq.d.size(); i++) {
             float v = std::max(sq.d[i], 0.f);
             // Limitar el sobreimpulso a ±35 % del valor original.
@@ -496,7 +556,8 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
             cr.d[i] = std::sqrt(std::max(P[0].d[i], 0.f)) - g;
             cb.d[i] = std::sqrt(std::max(P[3].d[i], 0.f)) - g;
         }
-        int radius = sigma > 0.01f ? 4 : (sigma > 0.004f ? 3 : 2);
+        float sigmaOut = sigma * amp * amp;   // ruido lineal tras aclarar (~k^0,9)
+        int radius = sigmaOut > 0.01f ? 4 : (sigmaOut > 0.004f ? 3 : 2);
         float eps = 4e-4f;
         cr = guidedFilter(sg, cr, radius, eps);
         cb = guidedFilter(sg, cb, radius, eps);
@@ -506,7 +567,6 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
         }
     }
 
-    const float* M = md.ccm;
     // 3) Baja resolución en sRGB lineal -> Smart HDR + mapa de ganancia.
     Plane hr(pw, ph), hg(pw, ph), hb(pw, ph);
     for (size_t i = 0; i < hr.d.size(); i++) {
@@ -607,8 +667,9 @@ inline void yuvToRgbGamma(float y, float u, float v, float* o) {
 void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, GainMapOut* gm) {
     Plane& Y = m.planes[0];
     float sigma = m.residualSigma();
-    // Copias del croma: se filtran más abajo, cuando ya se sabe cuánta ganancia lleva la foto.
-    Plane U = m.planes[1], V = m.planes[2];
+    // El croma se filtra más abajo, cuando ya se sabe cuánta ganancia lleva la foto. Se mueve (no
+    // se copia): después de revelar, la fusión no se vuelve a usar.
+    Plane U = std::move(m.planes[1]), V = std::move(m.planes[2]);
     bool hasShort = !m.shortPlanes.empty();
     int w = Y.w, h = Y.h;
 
@@ -625,70 +686,75 @@ void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, 
         }
         for (int c = 0; c < 3; c++) o[c] *= p.exposure;
     };
+    // Imagen lineal de baja resolución (lado mayor <= maxSide); step > 1 muestrea sólo parte de cada bloque.
+    auto lowRes = [&](int maxSide, int step) {
+        int f = std::max(1, int(std::ceil(std::max(w, h) / float(maxSide))));
+        int lw = w / f, lh = h / f;
+        LowRes lr{Plane(lw, lh), Plane(lw, lh), Plane(lw, lh)};
+        int st = std::min(step, f);
+        parallelFor(lh, [&](int y0, int y1) {
+            float o[3];
+            for (int y = y0; y < y1; y++)
+                for (int x = 0; x < lw; x++) {
+                    float s[3] = {0, 0, 0};
+                    int n = 0;
+                    for (int dy = 0; dy < f; dy += st)
+                        for (int dx = 0; dx < f; dx += st) {
+                            linAt(x * f + dx, y * f + dy, o);
+                            s[0] += o[0]; s[1] += o[1]; s[2] += o[2];
+                            n++;
+                        }
+                    float k = 1.f / n;
+                    lr.r.at(x, y) = s[0] * k; lr.g.at(x, y) = s[1] * k; lr.b.at(x, y) = s[2] * k;
+                }
+        });
+        return lr;
+    };
 
-    // Baja resolución (el promedio de bloques ya quita el ruido: sirve antes de filtrar).
-    int f = std::max(1, int(std::ceil(std::max(w, h) / 1024.f)));
-    int lw = w / f, lh = h / f;
-    LowRes lr{Plane(lw, lh), Plane(lw, lh), Plane(lw, lh)};
-    parallelFor(lh, [&](int y0, int y1) {
-        float o[3];
-        for (int y = y0; y < y1; y++)
-            for (int x = 0; x < lw; x++) {
-                float s[3] = {0, 0, 0};
-                for (int dy = 0; dy < f; dy++)
-                    for (int dx = 0; dx < f; dx++) {
-                        linAt(x * f + dx, y * f + dy, o);
-                        s[0] += o[0]; s[1] += o[1]; s[2] += o[2];
-                    }
-                float k = 1.f / (f * f);
-                lr.r.at(x, y) = s[0] * k; lr.g.at(x, y) = s[1] * k; lr.b.at(x, y) = s[2] * k;
-            }
-    });
-    GainField field = makeField(lr, p);
-
-    // El ruido se mide antes de aclarar, pero el brillo automático, la exposición y el Smart HDR
-    // (sombras x1,8) lo multiplican después. Sin tenerlo en cuenta, el selfie de noche salía con
-    // grano grueso y manchas de colores ("quemado"). En gamma la ganancia lineal k sube el ruido ~k^0,45.
-    float total = field.autoGain * std::max(p.exposure, 1.f) * (p.smartHdr ? 1.5f : 1.f);
-    float amp = std::min(std::max(std::pow(total, 0.45f), 1.f), 2.5f);
-    float se = sigma * amp;   // ruido efectivo en la salida
+    // El ruido se mide antes de aclarar, pero el brillo automático, la exposición y el Smart HDR lo
+    // multiplican después. Sin tenerlo en cuenta, el selfie de noche salía con grano grueso y manchas
+    // de colores. La ganancia se estima en una vista previa muy reducida (bloques grandes: el
+    // promedio quita el ruido); el revelado de verdad se mide más abajo, ya sin ruido.
+    float autoGain = estimateAutoGain(lowRes(256, 2), p);
+    float ampBase = noiseAmp(autoGain, p, false);   // enfoque y textura
+    float amp = noiseAmp(autoGain, p, true);         // reducción de ruido (cuenta el Smart HDR)
+    float se = sigma * amp;                          // ruido efectivo en la salida (decide qué filtrar)
+    // Los filtros trabajan sobre la imagen antes de aclarar, donde el ruido real es sigma: el rango se
+    // abre sólo con la raíz de la ganancia para no borrar bordes suaves (piel, tela).
+    float rs = sigma * std::sqrt(amp);
+    float seSharp = se;
 
     // Grano grueso: la reducción de ruido del ISP quita el ruido fino pero deja manchas de 2-4 px que
-    // el modelo de ruido (fino) no ve. Se mide y se limpia a media resolución y sólo se devuelve
-    // la corrección (el detalle fino queda intacto).
-    {
+    // el modelo de ruido (fino) no ve. Se mide y se limpia a media resolución y sólo se devuelve la
+    // corrección (el detalle fino queda intacto). Sólo si la foto se aclara: con luz, la medida
+    // confundiría la textura (hierba, grava) con ruido.
+    if (amp > 1.2f) {
         Plane y2 = resizeBilinear(Y, std::max(1, w / 2), std::max(1, h / 2));
-        float s2 = estimateNoise(y2).sigma(0.18f) * amp;
+        float s2raw = estimateNoise(y2).sigma(0.18f);
+        float s2 = s2raw * amp;
         if (s2 > 2.f / 255.f) {
-            Plane d = bilateral5(y2, 2.5f * s2);
-            if (s2 > 4.f / 255.f) {
-                Plane sm = guidedFilter(d, d, std::max(2, d.w / 300), (1.6f * s2) * (1.6f * s2));
-                float mix = std::min(1.f, (s2 * 255.f - 4.f) / 6.f) * 0.8f;
-                for (size_t i = 0; i < d.d.size(); i++) d.d[i] += (sm.d[i] - d.d[i]) * mix;
-            }
+            float r2 = s2raw * std::sqrt(amp);
+            Plane d = bilateral5(y2, 2.5f * r2);
+            smoothFlat(d, std::max(2, d.w / 300), r2, s2);
             for (size_t i = 0; i < d.d.size(); i++) d.d[i] -= y2.d[i];
             Plane corr = resizeBilinear(d, w, h);
             for (size_t i = 0; i < Y.d.size(); i++) Y.d[i] += corr.d[i];
-            se = std::max(se, 0.5f * s2);   // lo que quede se trata también como ruido al enfocar
+            // Lo que quede se trata como ruido al enfocar (pero no se vuelve a filtrar).
+            seSharp = std::max(seSharp, 0.5f * s2);
         }
     }
-    if (se > 1.5f / 255.f) Y = bilateral5(Y, 2.5f * se);
-    if (se > 4.f / 255.f) {
-        // Grano grueso (el que deja la reducción de ruido del ISP): suavizado guiado por la propia
-        // luma, que conserva los bordes (gafas, pelo) y aplana la piel y las paredes.
-        Plane sm = guidedFilter(Y, Y, std::max(2, Y.w / 600), (1.6f * se) * (1.6f * se));
-        float mix = std::min(1.f, (se * 255.f - 4.f) / 6.f) * 0.8f;
-        for (size_t i = 0; i < Y.d.size(); i++) Y.d[i] += (sm.d[i] - Y.d[i]) * mix;
-    }
+    if (se > 1.5f / 255.f) Y = bilateral5(Y, 2.5f * rs);
+    // Suavizado guiado por la propia luma: conserva los bordes (gafas, pelo) y aplana piel y paredes.
+    smoothFlat(Y, std::max(2, Y.w / 600), rs, se);
     // Ruido de color: filtro guiado por la luma a la resolución del croma (quita las manchas sin
-    // cruzar bordes). En las sombras, con mucha ganancia, el croma además se atenúa (lo que hace
-    // cualquier ISP): ahí casi todo el color es ruido.
+    // cruzar bordes). En sombras con mucha ganancia el croma débil además se atenúa (lo que hace
+    // cualquier ISP): ahí casi todo ese color es ruido. El color intenso (azul, rojo oscuros) se respeta.
     {
         float cs = se * 255.f;
         Plane yd = resizeBilinear(Y, U.w, U.h);
         if (cs > 1.2f) {
             int r = std::max(2, U.w / (cs > 4.f ? 80 : 220));
-            float eps = std::max(1e-4f, 8.f * se * se);
+            float eps = std::max(1e-4f, 8.f * rs * rs);
             U = guidedFilter(yd, U, r, eps);
             V = guidedFilter(yd, V, r, eps);
         } else {
@@ -697,16 +763,23 @@ void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, 
         }
         if (cs > 3.f) {
             float lo = std::min(0.25f, 6.f * se);
+            float c0 = 3.f * rs, c1 = 8.f * rs + 0.02f;
             for (size_t i = 0; i < U.d.size(); i++) {
-                float k = 0.4f + 0.6f * smoothstep(0.f, lo, yd.d[i]);
+                float chroma = std::sqrt(U.d[i] * U.d[i] + V.d[i] * V.d[i]);
+                float keep = std::max(smoothstep(0.f, lo, yd.d[i]), smoothstep(c0, c1, chroma));
+                float k = 0.4f + 0.6f * keep;
                 U.d[i] *= k; V.d[i] *= k;
             }
         }
     }
     // El YUV ya viene procesado por el ISP: menos realce de textura que en RAW, y nada de textura
     // cuando la foto se aclara mucho (sólo realzaría el grano).
-    sharpenPlane(Y, se, p.sharpen / amp);
-    if (amp < 1.3f) texturePlane(Y, std::max(2, Y.w / 1000), 0.2f * p.sharpen, se * 1.5f);
+    sharpenPlane(Y, seSharp, p.sharpen / ampBase);
+    if (ampBase < 1.3f) texturePlane(Y, std::max(2, Y.w / 1000), 0.2f * p.sharpen, seSharp * 1.5f);
+
+    // Baja resolución ya sin ruido: brillo automático, Smart HDR, balance de blancos y mapa de ganancia.
+    LowRes lr = lowRes(1024, 1);
+    GainField field = makeField(lr, p);
     const Plane& gain = field.gain;
     Renderer rd(p.style, p.saturation);
     {

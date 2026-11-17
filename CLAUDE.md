@@ -67,7 +67,7 @@ cmake -S app/src/main/cpp/tests -B build-tests && cmake --build build-tests -j &
 
 ./gradlew testDebugUnitTest   # Kotlin puro: ExifWriter, MotionPhotoWriter, QrContent
 ./gradlew assembleDebug       # APK de depuración
-./gradlew assembleRelease     # APK de release (firmado con la clave de debug a propósito)
+./gradlew assembleRelease     # APK de release (clave fija si CCAMERA_KEYSTORE está definida; si no, la de debug)
 ```
 
 ## Arquitectura

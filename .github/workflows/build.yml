@@ -38,7 +38,21 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Pruebas Kotlin (JVM)
         run: ./gradlew --no-daemon testDebugUnitTest
+      - name: Clave de firma fija (secretos del repositorio)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.CCAMERA_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Falta el secreto CCAMERA_KEYSTORE_BASE64: sin clave fija el APK no se podría instalar encima de la versión anterior."
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/ccamera.jks"
+          echo "CCAMERA_KEYSTORE=$RUNNER_TEMP/ccamera.jks" >> "$GITHUB_ENV"
       - name: Compilar APK
+        env:
+          CCAMERA_KEYSTORE_PASSWORD: ${{ secrets.CCAMERA_KEYSTORE_PASSWORD }}
+          CCAMERA_KEY_ALIAS: ${{ secrets.CCAMERA_KEY_ALIAS }}
+          CCAMERA_KEY_PASSWORD: ${{ secrets.CCAMERA_KEY_PASSWORD }}
         run: ./gradlew --no-daemon assembleRelease
       - uses: actions/upload-artifact@v4
         with:

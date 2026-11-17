@@ -290,12 +290,17 @@ class CameraController(private val context: Context) {
                             override fun onClosed(session: CameraExtensionSession) { closed.complete(Unit) }
                         },
                     )
-                    try {
-                        dev.createExtensionSession(cfg)
-                    } catch (e: Exception) {
-                        error = "error del sistema de cámara (${e.javaClass.simpleName})"
-                        if (cont.isActive) cont.resume(null)
-                    }
+                    // En un hilo aparte: si el servicio del fabricante bloquea la llamada, el límite de
+                    // tiempo sigue funcionando (una corrutina no puede interrumpir una llamada bloqueada)
+                    // y el hilo de la interfaz no se congela.
+                    Thread({
+                        try {
+                            dev.createExtensionSession(cfg)
+                        } catch (e: Exception) {
+                            error = "error del sistema de cámara (${e.javaClass.simpleName})"
+                            if (cont.isActive) cont.resume(null)
+                        }
+                    }, "ext-session").apply { isDaemon = true }.start()
                 }
             }.also { if (it == null && error == null) timedOut = true }
             if (s != null) {

@@ -17,6 +17,7 @@ import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.max
@@ -189,53 +190,74 @@ object Portrait {
 
     fun hasPerson(coverage: Float) = coverage >= MIN_COVERAGE
 
+    /** Límite para la segmentación de la foto final: si ML Kit no contesta, la foto se guarda sin desenfoque. */
+    const val APPLY_TIMEOUT_MS = 8_000L
+    /** Límite para el aviso en vivo (se repite cada ~0,7 s: no vale la pena esperar más). */
+    const val DETECT_TIMEOUT_MS = 2_000L
+
     /**
      * ¿Hay una persona en este fotograma de la vista previa (ya en vertical)? Para el aviso en vivo
      * "Luz natural" / "Se necesita una persona". Reduce el fotograma y cuenta fuera del hilo principal.
+     * Devuelve null si ML Kit no contesta a tiempo.
      */
-    suspend fun detectPerson(preview: Bitmap): Boolean {
+    suspend fun detectPerson(preview: Bitmap): Boolean? {
         val small = withContext(Dispatchers.Default) {
             val s = 256f / max(preview.width, preview.height)
             Bitmap.createScaledBitmap(preview, (preview.width * s).toInt().coerceAtLeast(1), (preview.height * s).toInt().coerceAtLeast(1), true)
         }
-        try {
-            val mask = segmenter.process(InputImage.fromBitmap(small, 0)).await()
-            return withContext(Dispatchers.Default) {
-                val fb = mask.buffer.order(ByteOrder.nativeOrder()).asFloatBuffer()
-                val a = FloatArray(fb.remaining())
-                fb.get(a)
-                hasPerson(coverage(a))
-            }
-        } finally {
-            if (small !== preview) small.recycle()
+        val owned = small !== preview
+        val task = liveSegmenter.process(InputImage.fromBitmap(small, 0))
+        // Tras el límite, ML Kit puede seguir leyendo el bitmap: entonces se recicla cuando termine.
+        val mask = withTimeoutOrNull(DETECT_TIMEOUT_MS) { task.await() }
+        if (mask == null) {
+            if (owned) task.addOnCompleteListener { small.recycle() }
+            return null
+        }
+        if (owned) small.recycle()
+        return withContext(Dispatchers.Default) {
+            val fb = mask.buffer.order(ByteOrder.nativeOrder()).asFloatBuffer()
+            val a = FloatArray(fb.remaining())
+            fb.get(a)
+            hasPerson(coverage(a))
         }
     }
 
-    private val segmenter by lazy {
-        Segmentation.getClient(
-            SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()
-        )
-    }
+    private fun segmenterClient() = Segmentation.getClient(
+        SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()
+    )
 
-    /** Devuelve false si no se detecta a nadie (la foto queda sin cambios). */
+    // Dos clientes: si el aviso en vivo se atasca, la foto no queda en cola detrás de él.
+    private val segmenter by lazy { segmenterClient() }
+    private val liveSegmenter by lazy { segmenterClient() }
+
+    /** Resultado del retrato. */
+    enum class Result { APPLIED, NO_PERSON, TIMEOUT }
+
+    /** Si no se detecta a nadie (o ML Kit no contesta a tiempo) la foto queda sin cambios. */
     suspend fun apply(
         bmp: Bitmap, rotation: Int, strength: Float = 0.025f, lighting: PortraitLighting = PortraitLighting.NATURAL,
-    ): Boolean {
+    ): Result {
         // Segmentar en vertical (la red funciona mejor con la persona derecha).
         val scale = 512f / max(bmp.width, bmp.height)
         val m = Matrix().apply { postScale(scale, scale); postRotate(rotation.toFloat()) }
         val small = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-        val mask = segmenter.process(InputImage.fromBitmap(small, 0)).await()
+        val task = segmenter.process(InputImage.fromBitmap(small, 0))
+        val mask = withTimeoutOrNull(APPLY_TIMEOUT_MS) { task.await() }
+        if (mask == null) {
+            Log.w("Portrait", "ML Kit no contestó en $APPLY_TIMEOUT_MS ms")
+            task.addOnCompleteListener { small.recycle() }
+            return Result.TIMEOUT
+        }
+        small.recycle()
         val mw = mask.width; val mh = mask.height
         val fb = mask.buffer.order(ByteOrder.nativeOrder()).asFloatBuffer()
         val upright = FloatArray(mw * mh)
         fb.get(upright)
-        small.recycle()
-        if (!hasPerson(coverage(upright))) return false
+        if (!hasPerson(coverage(upright))) return Result.NO_PERSON
         // Volver a la orientación del sensor.
         val (sw, sh, sensor) = rotateMask(upright, mw, mh, (360 - rotation) % 360)
         NativeEngine.bokeh(bmp, sensor, sw, sh, strength, lighting.ordinal)
-        return true
+        return Result.APPLIED
     }
 
     /** Gira una máscara 0/90/180/270 grados en sentido horario. */

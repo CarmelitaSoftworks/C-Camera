@@ -12,8 +12,8 @@ android {
         applicationId = "com.carmelita.ccamera"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.4.4"
+        versionCode = 12
+        versionName = "0.4.5"
 
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
         externalNativeBuild {
@@ -28,13 +28,26 @@ android {
         }
     }
 
+    // Clave fija de firma (secretos de GitHub en Actions, o variables de entorno en local). Con la
+    // misma clave cada versión se instala encima de la anterior y la app conserva sus fotos. Sin
+    // ella se firma con la clave de debug de esa máquina (en Actions es nueva en cada compilación).
+    val keystorePath = System.getenv("CCAMERA_KEYSTORE")?.takeIf { it.isNotBlank() && file(it).exists() }
+    signingConfigs {
+        if (keystorePath != null) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("CCAMERA_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("CCAMERA_KEY_ALIAS")
+                keyPassword = System.getenv("CCAMERA_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Firmado con la clave de debug para poder instalar el APK directamente.
-            // Cámbialo por tu propia signingConfig antes de publicar.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (keystorePath != null) "release" else "debug")
         }
     }
     compileOptions {

@@ -41,6 +41,7 @@ import com.carmelita.ccamera.share.InstagramFormat
 import com.carmelita.ccamera.storage.ExifWriter
 import com.carmelita.ccamera.storage.LocationHelper
 import com.carmelita.ccamera.storage.MediaSaver
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -591,7 +592,13 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                     continue
                 }
                 val bmp = runCatching { previewFrameProvider?.invoke() }.getOrNull() ?: continue
-                val found = runCatching { Portrait.detectPerson(bmp) }.getOrNull()
+                val found = try {
+                    Portrait.detectPerson(bmp)
+                } catch (e: CancellationException) {
+                    bmp.recycle(); throw e
+                } catch (e: Throwable) {
+                    null
+                }
                 bmp.recycle()
                 if (found != null && _state.value.mode == CaptureMode.PORTRAIT && _state.value.portraitSubject != found) {
                     _state.update { it.copy(portraitSubject = found) }
@@ -945,10 +952,19 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 j.close(); job = null
                 var portraitNote: String? = null
                 if (s.mode == CaptureMode.PORTRAIT) {
-                    val ok = runCatching { Portrait.apply(bmp, rotation, Portrait.strengthFor(s.portraitF), s.portraitLight) }
-                        .getOrElse { Log.w(TAG, "Retrato", it); false }
-                    if (ok) portraitNote = "f/${fmtF(s.portraitF)} · ${s.portraitLight.label}"
-                    else toast("No se detectó a ninguna persona: foto sin desenfoque")
+                    val r = try {
+                        Portrait.apply(bmp, rotation, Portrait.strengthFor(s.portraitF), s.portraitLight)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "Retrato", e); null
+                    }
+                    when (r) {
+                        Portrait.Result.APPLIED -> portraitNote = "f/${fmtF(s.portraitF)} · ${s.portraitLight.label}"
+                        Portrait.Result.NO_PERSON -> toast("No se detectó a ninguna persona: foto sin desenfoque")
+                        Portrait.Result.TIMEOUT -> toast("El retrato tardó demasiado: foto guardada sin desenfoque")
+                        null -> toast("No se pudo aplicar el retrato: foto guardada sin desenfoque")
+                    }
                 }
                 val clip = liveClip?.await()
                 saveFinished(bmp, rotation, refResult, kind, s, clip, firstRaw.takeIf { s.saveDng }, portraitNote)
@@ -993,7 +1009,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Throwable) {
                 Log.e(TAG, "Foto con el procesado del teléfono", e)
                 val busy = if (counted) processingCount.decrementAndGet().coerceAtLeast(0) else processingCount.get()
-                _state.update { it.copy(capturing = false, processing = busy, message = "No se pudo hacer la foto: ${e.message}") }
+                // counted = el teléfono ya entregó el JPEG: el fallo fue al guardarlo.
+                val msg = if (counted) "La foto se hizo pero no se pudo guardar: ${e.message}"
+                else "El teléfono no hizo la foto: ${e.message}"
+                _state.update { it.copy(capturing = false, processing = busy, message = msg) }
             }
         }
     }

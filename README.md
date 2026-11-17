@@ -29,6 +29,12 @@ el objeto en movimiento no deja fantasmas.*
 | **Vídeo** | 4K o 1080p, 30/60 fps, HEVC si está disponible, estabilización y audio estéreo |
 | **Estilos fotográficos** | Estándar, Contraste intenso, Vibrante, Cálido y Frío |
 | **Lector de QR** | Automático en el visor: enlaces, Wi‑Fi (diálogo del sistema para conectarse), contactos, eventos, teléfono, correo, SMS y ubicaciones |
+| **Disparo rápido** | La cámara queda libre en cuanto se copian los fotogramas; el procesado sigue en segundo plano y las fotos hacen cola |
+| **Fotograma más nítido** | De los 3 últimos fotogramas se usa como base el menos movido; la vista previa no baja de 1/30 s |
+| **Reducción de ruido adaptativa** | Filtro LMMSE en dominio de varianza estabilizada: limpia zonas lisas y con pocos fotogramas sin borrar textura |
+| **Exposición, cuadrícula, temporizador** | Deslizar tras tocar para enfocar aclara u oscurece; cuadrícula de tercios; temporizador de 3 y 10 s; botones de volumen como disparador |
+| **Sugerencia de Noche** | Con poca luz aparece un aviso para pasar al modo Noche |
+| **RAW original (DNG)** | Opcional: guarda también el RAW de referencia junto a la foto |
 | **Detección de la cámara** | Al abrirse comprueba qué soporta el teléfono y prueba sesiones de la mejor a la más básica (RAW+ZSL+en vivo → … → YUV). La pantalla *Info de cámara* lo muestra todo |
 
 ### Instagram
@@ -38,6 +44,7 @@ Desde el visor de la última foto, **Instagram** prepara una copia y abre la app
 - **Tamaño exacto** con 1080 px de ancho, así Instagram no la vuelve a escalar: **3:4 (1080×1440)**,
   que es el formato más alto del feed y el único que la cuadrícula del perfil no recorta (y
   coincide con el 4:3 del sensor), además de 4:5, 1:1 e Historia 9:16 (sobre fondo desenfocado).
+- **Encuadre a elegir** (arriba, centro o abajo) cuando el formato obliga a recortar.
 - **Reducción Lanczos en luz lineal** + un enfoque de salida suave que compensa la recompresión.
 - **JPEG de calidad 95** y **Ultra HDR conservado**: Instagram en Android muestra las fotos HDR.
 
@@ -92,6 +99,7 @@ Hace falta JDK 17 y el Android SDK con NDK (Android Studio los instala).
   de Fotos en vivo, la app baja automáticamente a lo que sí funciona (lo verás en *Info de cámara*).
 - Los teléfonos con sensor de 50 MP suelen dar RAW binned de 12,5 MP; la app limita la resolución de
   la fusión según la memoria del teléfono.
+- Con RAW, el zoom digital recorta el sensor: a mucho aumento la foto tiene menos resolución.
 - Las Fotos en vivo no llevan audio.
 - El modo Retrato separa personas; no mascotas ni objetos.
 

@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -47,9 +48,11 @@ import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.NightsStay
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Cameraswitch
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -136,6 +139,15 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
         onDispose { listener.disable() }
     }
 
+    // Botones de volumen = disparador (sólo con el visor de cámara a la vista).
+    DisposableEffect(Unit) {
+        ShutterKeys.onShutter = {
+            val st = vm.state.value
+            if (st.viewer == null && !st.showInfo) vm.shutter()
+        }
+        onDispose { ShutterKeys.onShutter = null }
+    }
+
     val video = state.mode == CaptureMode.VIDEO
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         Column(Modifier.fillMaxSize().systemBarsPadding()) {
@@ -145,8 +157,14 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
             else Modifier.fillMaxWidth().aspectRatio(3f / 4f)
             Box(previewModifier.align(Alignment.CenterHorizontally)) {
                 Preview(vm)
-                FocusOverlay(state.focus)
+                if (state.grid) GridOverlay()
+                FocusOverlay(state.focus, state.ev, state.evSupported)
                 ShutterFlash(state.shutterFlash)
+                if (state.countdown > 0) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("${state.countdown}", color = Color.White, fontSize = 96.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
                 if (state.recording) RecordingTimer(state.recordStartMs, Modifier.align(Alignment.TopCenter).padding(top = 10.dp))
 
                 Column(
@@ -156,8 +174,18 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
                     AnimatedVisibility(state.qr != null && !state.capturing, enter = fadeIn(), exit = fadeOut()) {
                         state.qr?.let { QrChip(it.title, it.subtitle, vm::onQrTap) }
                     }
+                    AnimatedVisibility(
+                        state.nightSuggested && state.mode == CaptureMode.PHOTO && !state.capturing && state.qr == null,
+                        enter = fadeIn(), exit = fadeOut(),
+                    ) {
+                        Pill(Icons.Filled.NightsStay, "Poca luz: usar Noche") { vm.setMode(CaptureMode.NIGHT) }
+                    }
                     AnimatedVisibility(state.capturing, enter = fadeIn(), exit = fadeOut()) {
                         CaptureHint(state.mode, state.captureProgress)
+                    }
+                    if (state.ev != 0f && state.focus == null && !video) {
+                        Spacer(Modifier.height(8.dp))
+                        SmallToggle("Exposición ${fmtEv(state.ev)}  ✕", true, vm::resetEv)
                     }
                     AnimatedVisibility(showStyles && !video, enter = fadeIn(), exit = fadeOut()) {
                         StylePicker(state.style, vm::setStyle)
@@ -178,7 +206,7 @@ fun CameraScreen(vm: CameraViewModel = viewModel()) {
                     Thumbnail(state, rot) { vm.openViewer() }
                     ShutterButton(
                         video = video, recording = state.recording,
-                        enabled = !state.capturing && state.processing < 2,
+                        enabled = !state.capturing && state.processing < state.maxQueued,
                         onClick = vm::shutter,
                     )
                     if (state.hasFront && !state.recording) {
@@ -231,8 +259,10 @@ private fun Preview(vm: CameraViewModel) {
             Modifier.fillMaxSize()
                 .pointerInput(Unit) { detectTapGestures { p -> vm.focusAt(p.x / size.width, p.y / size.height) } }
                 .pointerInput(Unit) {
-                    detectTransformGestures { _, _, zoomChange, _ ->
+                    detectTransformGestures { _, pan, zoomChange, _ ->
                         if (zoomChange != 1f) vm.setZoom(vm.state.value.zoom * zoomChange)
+                        // Con el recuadro de enfoque visible, deslizar arriba/abajo ajusta la exposición.
+                        else if (pan.y != 0f) vm.adjustEv(-pan.y / size.height)
                     }
                 },
         )
@@ -267,6 +297,10 @@ private fun TopBar(state: CameraUiState, rot: Float, stylesOpen: Boolean, vm: Ca
             }
             if (!video) TopIcon(if (state.smartHdr) Icons.Filled.HdrOn else Icons.Filled.HdrOff, "Smart HDR",
                 if (state.smartHdr) Yellow else Color.White, rot, onClick = vm::toggleHdr)
+            if (!video) {
+                if (state.timerSec > 0) SmallToggle("${state.timerSec} s", true, vm::cycleTimer)
+                else TopIcon(Icons.Outlined.Timer, "Temporizador", Color.White, rot, onClick = vm::cycleTimer)
+            }
         }
         when {
             state.mode == CaptureMode.NIGHT -> Pill(Icons.Filled.NightsStay, "Noche")
@@ -277,7 +311,7 @@ private fun TopBar(state: CameraUiState, rot: Float, stylesOpen: Boolean, vm: Ca
             else -> Text(
                 buildString {
                     if (state.rawActive) append("RAW")
-                    if (state.ultraHdr) { if (isNotEmpty()) append(" · "); append("ULTRA HDR") }
+                    if (state.ultraHdr) { if (isNotEmpty()) append(" · "); append("HDR") }
                 },
                 color = Color(0xFF8E8E93), fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
             )
@@ -294,9 +328,11 @@ private fun TopBar(state: CameraUiState, rot: Float, stylesOpen: Boolean, vm: Ca
 }
 
 @Composable
-private fun Pill(icon: ImageVector, text: String) {
+private fun Pill(icon: ImageVector, text: String, onClick: (() -> Unit)? = null) {
     Row(
-        Modifier.clip(RoundedCornerShape(50)).background(Yellow).padding(horizontal = 10.dp, vertical = 4.dp),
+        Modifier.clip(RoundedCornerShape(50)).background(Yellow)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(icon, null, tint = Color.Black, modifier = Modifier.size(16.dp))
@@ -342,8 +378,30 @@ private fun QrChip(title: String, subtitle: String, onClick: () -> Unit) {
     }
 }
 
+private fun fmtEv(ev: Float): String = (if (ev > 0f) "+" else "") + "%.1f".format(ev)
+
+/** Líneas de los tercios. */
 @Composable
-private fun FocusOverlay(focus: FocusMark?) {
+private fun GridOverlay() {
+    val line = Color(0x59FFFFFF)
+    Row(Modifier.fillMaxSize()) {
+        Spacer(Modifier.weight(1f))
+        Box(Modifier.width(1.dp).fillMaxHeight().background(line))
+        Spacer(Modifier.weight(1f))
+        Box(Modifier.width(1.dp).fillMaxHeight().background(line))
+        Spacer(Modifier.weight(1f))
+    }
+    Column(Modifier.fillMaxSize()) {
+        Spacer(Modifier.weight(1f))
+        Box(Modifier.height(1.dp).fillMaxWidth().background(line))
+        Spacer(Modifier.weight(1f))
+        Box(Modifier.height(1.dp).fillMaxWidth().background(line))
+        Spacer(Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun FocusOverlay(focus: FocusMark?, ev: Float, evSupported: Boolean) {
     if (focus == null) return
     val anim = remember(focus.id) { Animatable(1.4f) }
     LaunchedEffect(focus.id) { anim.animateTo(1f, tween(250)) }
@@ -353,6 +411,17 @@ private fun FocusOverlay(focus: FocusMark?) {
         val x = with(d) { (focus.x * constraints.maxWidth).toDp() } - sizeDp / 2
         val y = with(d) { (focus.y * constraints.maxHeight).toDp() } - sizeDp / 2
         Box(Modifier.offset(x, y).size(sizeDp).scale(anim.value).border(1.5.dp, Yellow, RoundedCornerShape(2.dp)))
+        if (evSupported) {
+            // El "sol": indica que deslizando arriba/abajo se aclara u oscurece.
+            val sunX = if (focus.x > 0.7f) x - 58.dp else x + sizeDp + 6.dp
+            Row(Modifier.offset(sunX, y + sizeDp / 2 - 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.WbSunny, "Exposición", tint = Yellow, modifier = Modifier.size(18.dp))
+                if (ev != 0f) {
+                    Spacer(Modifier.width(3.dp))
+                    Text(fmtEv(ev), color = Yellow, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
     }
 }
 

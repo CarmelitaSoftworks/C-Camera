@@ -65,6 +65,7 @@ fun PhotoViewer(uri: Uri, state: CameraUiState, vm: CameraViewModel) {
     var bmp by remember(uri) { mutableStateOf<Bitmap?>(null) }
     var playing by remember(uri) { mutableStateOf(false) }
     var showFormats by remember { mutableStateOf(false) }
+    var anchor by remember { mutableStateOf(0.5f) }
     val liveClip = if (uri == state.lastUri) state.lastLiveClip?.takeIf { it.exists() } else null
 
     BackHandler { vm.closeViewer() }
@@ -154,11 +155,26 @@ fun PhotoViewer(uri: Uri, state: CameraUiState, vm: CameraViewModel) {
                             "enfoque de salida. Se mantiene el Ultra HDR si la foto lo tiene.",
                         color = Color(0xFF8E8E93), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp),
                     )
+                    Row(
+                        Modifier.padding(bottom = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Si hay que recortar, conservar:", color = Color(0xFF8E8E93), fontSize = 12.sp)
+                        listOf(0f to "Arriba", 0.5f to "Centro", 1f to "Abajo").forEach { (value, label) ->
+                            val sel = anchor == value
+                            Text(
+                                label, color = if (sel) Color.Black else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.clip(RoundedCornerShape(50)).background(if (sel) Yellow else Color(0x33FFFFFF))
+                                    .clickable { anchor = value }.padding(horizontal = 10.dp, vertical = 5.dp),
+                            )
+                        }
+                    }
                     InstagramFormat.entries.forEach { f ->
                         Text(
                             f.label + "  ·  ${f.w}×${f.h}", color = Color.White, fontSize = 15.sp,
                             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-                                .clickable { showFormats = false; vm.exportInstagram(f) }
+                                .clickable { showFormats = false; vm.exportInstagram(f, anchor) }
                                 .padding(vertical = 12.dp, horizontal = 8.dp),
                         )
                     }
@@ -204,6 +220,8 @@ fun InfoSheet(state: CameraUiState, vm: CameraViewModel) {
             }
             Spacer(Modifier.height(16.dp))
             Text("Ajustes", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            SettingRow("Cuadrícula", state.grid, vm::toggleGrid)
+            if (state.rawActive) SettingRow("Guardar también el RAW (DNG)", state.saveDng, vm::toggleDng)
             SettingRow("Lector de QR automático", state.qrEnabled, vm::toggleQr)
             SettingRow("Fotos en vivo", state.livePhoto, vm::toggleLive)
             SettingRow("Smart HDR", state.smartHdr, vm::toggleHdr)

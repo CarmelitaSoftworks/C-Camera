@@ -90,33 +90,60 @@ Java_com_carmelita_ccamera_processing_NativeEngine_setNoiseProfile(JNIEnv*, jobj
     S(h)->hasNoise = true;
 }
 
-/** RAW16: buffer directo con uint16 por píxel. */
+/**
+ * RAW16: buffer directo con uint16 por píxel. Se ingiere sólo el recorte (cropX, cropY, cropW,
+ * cropH), alineado a píxeles pares para conservar la fase del mosaico. `scale` iguala la
+ * exposición de este frame a la de la referencia.
+ */
 JNIEXPORT void JNICALL
 Java_com_carmelita_ccamera_processing_NativeEngine_addRaw(
         JNIEnv* env, jobject, jlong h, jobject buffer, jint rowStride, jint width, jint height,
-        jint cfa, jfloatArray blackArr, jfloat white, jboolean isShort, jfloat ratio) {
+        jint cfa, jfloatArray blackArr, jfloat white, jint cropX, jint cropY, jint cropW, jint cropH,
+        jfloat scale, jboolean isShort, jfloat ratio) {
     auto* base = static_cast<const uint8_t*>(env->GetDirectBufferAddress(buffer));
     if (!base) { throwJava(env, "El buffer RAW no es directo"); return; }
+    cropX &= ~1; cropY &= ~1; cropW &= ~1; cropH &= ~1;
+    if (cropW <= 0 || cropH <= 0) { cropX = 0; cropY = 0; cropW = width & ~1; cropH = height & ~1; }
+    jlong cap = env->GetDirectBufferCapacity(buffer);
+    if (cropX < 0 || cropY < 0 || cropX + cropW > width || cropY + cropH > height || cropW < 64 || cropH < 64 ||
+        jlong(cropY + cropH - 1) * rowStride + jlong(cropX + cropW) * 2 > cap) {
+        throwJava(env, "Recorte RAW fuera de la imagen");
+        return;
+    }
     float black[4];
     env->GetFloatArrayRegion(blackArr, 0, 4, black);
     int map[4];
     cfaMap(cfa, map);
-    int pw = width / 2, ph = height / 2;
+    int pw = cropW / 2, ph = cropH / 2;
     std::vector<Plane> P(4, Plane(pw, ph));
     parallelFor(ph, [&](int y0, int y1) {
         for (int y = y0; y < y1; y++)
             for (int dy = 0; dy < 2; dy++) {
-                const uint16_t* row = reinterpret_cast<const uint16_t*>(base + size_t(2 * y + dy) * rowStride);
+                const uint16_t* row = reinterpret_cast<const uint16_t*>(base + size_t(cropY + 2 * y + dy) * rowStride) + cropX;
                 for (int x = 0; x < pw; x++)
                     for (int dx = 0; dx < 2; dx++) {
                         int pos = dy * 2 + dx;
-                        float v = (float(row[2 * x + dx]) - black[pos]) / (white - black[pos]);
+                        float v = (float(row[2 * x + dx]) - black[pos]) / (white - black[pos]) * scale;
                         P[map[pos]].at(x, y) = std::min(std::max(v, 0.f), 1.f);
                     }
             }
     });
     addFrame(S(h), Frame::makeBayer(std::move(P[0]), std::move(P[1]), std::move(P[2]), std::move(P[3])),
              isShort, ratio);
+}
+
+/**
+ * Nitidez de un frame (para elegir la referencia). bytesPerSample: 2 = RAW16 (mosaico), 1 = luma.
+ */
+JNIEXPORT jdouble JNICALL
+Java_com_carmelita_ccamera_processing_NativeEngine_frameSharpness(
+        JNIEnv* env, jobject, jobject buffer, jint rowStride, jint x, jint y, jint w, jint hh, jint bytesPerSample) {
+    auto* base = static_cast<const uint8_t*>(env->GetDirectBufferAddress(buffer));
+    jlong cap = env->GetDirectBufferCapacity(buffer);
+    if (!base || x < 0 || y < 0 || w < 16 || hh < 16 ||
+        jlong(y + hh - 1) * rowStride + jlong(x + w) * bytesPerSample > cap) return 0.0;
+    if (bytesPerSample == 2) return gradientEnergy(reinterpret_cast<const uint16_t*>(base), rowStride, x, y, w, hh, 2);
+    return gradientEnergy(base, rowStride, x, y, w, hh, 1);
 }
 
 JNIEXPORT void JNICALL
@@ -167,12 +194,13 @@ Java_com_carmelita_ccamera_processing_NativeEngine_outputSize(JNIEnv* env, jobje
 /**
  * Revela en `bitmap` (RGBA_8888 del tamaño de outputSize). Devuelve el mapa de ganancia
  * (bytes) o null; sus dimensiones se consultan con gainMapSize().
- * meta: [wb0..3, ccm0..8] ; lsc: (lscW*lscH*4) o null.
+ * meta: [wb0..3, ccm0..8] ; lsc: (lscW*lscH*4) o null ; lscWindow: [u0, v0, u1, v1] o null.
  */
 JNIEXPORT jbyteArray JNICALL
 Java_com_carmelita_ccamera_processing_NativeEngine_process(
         JNIEnv* env, jobject, jlong h, jobject bitmap, jfloatArray meta, jfloatArray lscArr, jint lscW, jint lscH,
-        jfloat exposure, jboolean smartHdr, jint style, jfloat sharpen, jboolean wantGainMap, jfloat headroom) {
+        jfloatArray lscWindow, jfloat exposure, jboolean smartHdr, jint style, jfloat sharpen, jfloat denoise,
+        jboolean wantGainMap, jfloat headroom) {
     Session* s = S(h);
     std::lock_guard<std::mutex> lock(s->mu);
     if (!s->merger) { throwJava(env, "No hay frames"); return nullptr; }
@@ -195,12 +223,18 @@ Java_com_carmelita_ccamera_processing_NativeEngine_process(
         md.lscW = lscW; md.lscH = lscH;
         md.lsc.resize(size_t(lscW) * lscH * 4);
         env->GetFloatArrayRegion(lscArr, 0, jsize(md.lsc.size()), md.lsc.data());
+        if (lscWindow && env->GetArrayLength(lscWindow) >= 4) {
+            float win[4];
+            env->GetFloatArrayRegion(lscWindow, 0, 4, win);
+            md.lscU0 = win[0]; md.lscV0 = win[1]; md.lscU1 = win[2]; md.lscV1 = win[3];
+        }
     }
     FinishParams p;
     p.exposure = exposure;
     p.smartHdr = smartHdr;
     p.style = static_cast<Style>(std::min(std::max(int(style), 0), 4));
     p.sharpen = sharpen;
+    p.denoise = denoise;
     p.gainMap = wantGainMap;
     p.hdrHeadroom = headroom;
     s->gain = GainMapOut();

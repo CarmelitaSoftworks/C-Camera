@@ -294,6 +294,7 @@ MergeResult Merger::result() {
         const Plane& W = wsum_[p];
         for (size_t i = 0; i < A.d.size(); i++) A.d[i] /= W.d[i];
     }
+    r.frameCount = std::move(wsum_[0]);
     r.planes = std::move(acc_);
     r.shortPlanes = std::move(short_);
     r.shortRatio = shortRatio_;

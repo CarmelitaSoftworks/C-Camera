@@ -99,19 +99,41 @@ void exportResize(const uint8_t* src, int sw, int sh, int sStride,
     Plane outp[3];
     for (int c = 0; c < 3; c++) {
         outp[c] = resizeLanczos(*chs[c], dw, dh);
+        // Anti-anillos: Lanczos en luz lineal deja halos oscuros junto a los bordes muy
+        // contrastados. Se limita cada píxel al rango de su entorno en una versión suave.
+        Plane soft = resizeBilinear(*chs[c], dw, dh);
+        Plane& o = outp[c];
+        parallelFor(dh, [&](int y0, int y1) {
+            for (int y = y0; y < y1; y++)
+                for (int x = 0; x < dw; x++) {
+                    float lo = 1e30f, hi = -1e30f;
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dx = -1; dx <= 1; dx++) {
+                            float v = soft.atc(x + dx, y + dy);
+                            lo = std::min(lo, v); hi = std::max(hi, v);
+                        }
+                    o.at(x, y) = std::min(std::max(o.at(x, y), lo), hi);
+                }
+        });
         *chs[c] = Plane();
     }
-    // Enfoque de salida (compensa la reducción y la recompresión de Instagram) sobre la luma.
-    Plane l(dw, dh);
-    for (size_t i = 0; i < l.d.size(); i++) l.d[i] = 0.2126f * outp[0].d[i] + 0.7152f * outp[1].d[i] + 0.0722f * outp[2].d[i];
-    Plane bl = gauss5(l);
+    // Enfoque de salida (compensa la reducción y la recompresión de Instagram). Se calcula sobre
+    // la luma en gamma (≈ perceptual) y con el sobreimpulso limitado, para no crear halos.
+    Plane lin2(dw, dh), lg(dw, dh);
+    for (size_t i = 0; i < lg.d.size(); i++) {
+        lin2.d[i] = 0.2126f * outp[0].d[i] + 0.7152f * outp[1].d[i] + 0.0722f * outp[2].d[i];
+        lg.d[i] = linToSrgbFast(lin2.d[i]);
+    }
+    Plane bl = gauss5(lg);
     parallelFor(dh, [&](int a, int b) {
         for (int y = a; y < b; y++) {
             uint8_t* row = dst + size_t(y) * dStride;
             for (int x = 0; x < dw; x++) {
                 size_t i = size_t(y) * dw + x;
-                float lv = l.d[i];
-                float boost = lv > 1e-5f ? (lv + sharpen * (lv - bl.d[i])) / lv : 1.f;
+                float g = lg.d[i];
+                float d = std::min(std::max(sharpen * (g - bl.d[i]), -0.04f), 0.04f);
+                float lv = lin2.d[i];
+                float boost = lv > 1e-5f ? srgbToLinFast(clamp01(g + d)) / lv : 1.f;
                 boost = std::min(std::max(boost, 0.5f), 2.f);
                 row[4 * x] = enc(outp[0].d[i] * boost);
                 row[4 * x + 1] = enc(outp[1].d[i] * boost);

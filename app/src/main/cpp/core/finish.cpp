@@ -289,10 +289,51 @@ Plane bilateral5(const Plane& p, float sigmaR) {
 
 // ---------------- RAW ----------------
 
+/**
+ * Reducción de ruido espacial tras la fusión (filtro de Lee / LMMSE local).
+ * Se trabaja en un dominio de varianza estabilizada (Anscombe generalizada con el perfil de ruido
+ * del sensor): ahí el ruido de un frame vale 1 en toda la imagen y 1/n tras fusionar n frames.
+ * Donde la varianza local es sólo ruido se promedia; donde hay textura o bordes no se toca.
+ * Las zonas con pocos frames (objetos en movimiento) reciben más limpieza automáticamente.
+ */
+void denoiseBayer(std::vector<Plane>& P, const NoiseModel& nm, const Plane& frames, float strength) {
+    if (strength <= 0 || P.empty()) return;
+    const float s = nm.s, o = std::max(nm.o, 1e-12f);
+    const bool shot = s > 1e-9f;
+    const float k = shot ? 2.f / s : 1.f / std::sqrt(o);
+    const int r = 2;
+    const bool perPixel = frames.w == P[0].w && frames.h == P[0].h;
+    for (auto& pl : P) {
+        Plane t(pl.w, pl.h), sq(pl.w, pl.h);
+        for (size_t i = 0; i < t.d.size(); i++) {
+            float x = std::max(pl.d[i], 0.f);
+            float v = shot ? k * std::sqrt(s * x + o) : k * x;
+            t.d[i] = v; sq.d[i] = v * v;
+        }
+        Plane mean = t;
+        boxH(mean, r); boxV(mean, r);
+        boxH(sq, r); boxV(sq, r);
+        Plane a(pl.w, pl.h), b(pl.w, pl.h);
+        for (size_t i = 0; i < a.d.size(); i++) {
+            float var = std::max(sq.d[i] - mean.d[i] * mean.d[i], 1e-9f);
+            float noiseVar = strength / std::max(perPixel ? frames.d[i] : 1.f, 1.f);
+            float g = std::max(var - noiseVar, 0.f) / var;
+            a.d[i] = g; b.d[i] = (1.f - g) * mean.d[i];
+        }
+        boxH(a, 1); boxV(a, 1); boxH(b, 1); boxV(b, 1);
+        for (size_t i = 0; i < t.d.size(); i++) {
+            float v = a.d[i] * t.d[i] + b.d[i];
+            float u = v / k;
+            pl.d[i] = shot ? std::max((u * u - o) / s, 0.f) : std::max(u, 0.f);
+        }
+    }
+}
+
 void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
                  uint8_t* out, int stride, GainMapOut* gm) {
     std::vector<Plane>& P = m.planes;   // R, G1, G2, B (media resolución, lineal)
     int pw = P[0].w, ph = P[0].h;
+    denoiseBayer(P, m.noise, m.frameCount, p.denoise);
     bool hasShort = !m.shortPlanes.empty();
     float clipLevel = std::min(std::min(md.wb[0], md.wb[1]), std::min(md.wb[2], md.wb[3]));
 
@@ -328,8 +369,10 @@ void finishBayer(MergeResult& m, const RawMetadata& md, const FinishParams& p,
                 float rawMax = rawMaxP.at(x, y);
                 float lsc[4] = {1, 1, 1, 1};
                 if (md.lscW > 1 && md.lscH > 1) {
-                    float u = float(x) / std::max(1, pw - 1) * (md.lscW - 1);
-                    float t = float(y) / std::max(1, ph - 1) * (md.lscH - 1);
+                    float u = (md.lscU0 + (md.lscU1 - md.lscU0) * float(x) / std::max(1, pw - 1)) * (md.lscW - 1);
+                    float t = (md.lscV0 + (md.lscV1 - md.lscV0) * float(y) / std::max(1, ph - 1)) * (md.lscH - 1);
+                    u = std::min(std::max(u, 0.f), float(md.lscW - 1));
+                    t = std::min(std::max(t, 0.f), float(md.lscH - 1));
                     int u0 = std::min(int(u), md.lscW - 2), t0 = std::min(int(t), md.lscH - 2);
                     float fu = u - u0, ft = t - t0;
                     for (int c = 0; c < 4; c++) {

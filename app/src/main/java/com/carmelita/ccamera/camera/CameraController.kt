@@ -78,6 +78,7 @@ class CameraController(private val context: Context) {
     private var videoMode = false
     private var videoFps = 30
     private var torch = false
+    private var evIndex = 0
 
     @Volatile var lastResult: TotalCaptureResult? = null
         private set
@@ -89,6 +90,7 @@ class CameraController(private val context: Context) {
         caps = CameraCapabilities.detect(manager, lens)
         zoom = 1f.coerceIn(caps.zoomRange.start, caps.zoomRange.endInclusive)
         focusRegions = null
+        evIndex = 0
         device = suspendCancellableCoroutine { cont ->
             manager.openCamera(caps.id, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) { if (cont.isActive) cont.resume(camera) else camera.close() }
@@ -239,6 +241,7 @@ class CameraController(private val context: Context) {
         recordSurface?.let { b.addTarget(it) }
         if (!videoMode) {
             val info = photoInfo
+            caps.photoFpsRange?.let { b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
             if (info?.zsl == true) reader?.surface?.let { b.addTarget(it) }
             live?.surface?.let { b.addTarget(it) }
             if (info?.raw == true && caps.lensShadingMap) {
@@ -278,6 +281,7 @@ class CameraController(private val context: Context) {
             else -> CameraMetadata.CONTROL_AE_MODE_ON
         }
         b.set(CaptureRequest.CONTROL_AE_MODE, aeMode)
+        if (caps.supportsEv) b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evIndex)
         if (caps.ois) b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
         if (caps.faceDetection) b.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE)
         val regions = focusRegions
@@ -311,6 +315,20 @@ class CameraController(private val context: Context) {
     }
 
     fun setFlash(mode: FlashMode) { flashMode = mode; updateRepeating() }
+
+    /** Compensación de exposición en pasos del sensor. Devuelve el valor aplicado en EV. */
+    fun setExposureCompensation(index: Int): Float {
+        if (!isOpen || !caps.supportsEv) return 0f
+        evIndex = index.coerceIn(caps.evRange.lower, caps.evRange.upper)
+        updateRepeating()
+        return evIndex * caps.evStep
+    }
+
+    /** ¿Hay tan poca luz que conviene el modo Noche? (exposición larga con ISO alto) */
+    fun sceneIsDark(): Boolean {
+        val (t, iso) = currentExposure() ?: return false
+        return t >= 30_000_000L && iso >= 1000
+    }
 
     fun setTorch(on: Boolean) { torch = on; updateRepeating() }
 
@@ -459,7 +477,8 @@ class CameraController(private val context: Context) {
             val b = stillBuilder()
             if (exp != null && ir != null && caps.manualSensor) {
                 val (t0, iso0) = exp
-                val product = t0.toDouble() * iso0 * 1.6        // algo más de luz: +2/3 EV
+                // Algo más de luz que el AE (+2/3 EV). La compensación del usuario ya va en t0 x iso0.
+                val product = t0.toDouble() * iso0 * 1.6
                 val maxT = 1_000_000_000.0 / 6                 // 1/6 s a pulso (con OIS)
                 val t = (product / max(ir.lower, 50)).coerceAtMost(if (caps.ois) maxT else maxT / 2).coerceAtLeast(t0.toDouble())
                 val iso = (product / t).roundToInt()

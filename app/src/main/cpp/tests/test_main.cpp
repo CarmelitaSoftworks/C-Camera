@@ -93,12 +93,17 @@ static void testRaw(const char* outDir) {
     std::mt19937 rng(7);
     NoiseModel nm{4e-4f, 4e-6f};
     Synth ref = rawFrame(0, 0, 1.f, 100, rng, nm);
-    Merger mg(ref.frame, nm);
     std::uniform_real_distribution<float> U(-8, 8);
-    for (int k = 1; k < 6; k++) mg.add(rawFrame(U(rng), U(rng), 1.f, 100 + 25 * k, rng, nm).frame);
+    std::vector<Frame> alts;
+    for (int k = 1; k < 6; k++) alts.push_back(rawFrame(U(rng), U(rng), 1.f, 100 + 25 * k, rng, nm).frame);
     Synth sh = rawFrame(U(rng), U(rng), 0.125f, 300, rng, nm);
-    mg.setShort(sh.frame, 8.f);
-    MergeResult m = mg.result();
+    auto mergeAll = [&]() {
+        Merger mg(ref.frame, nm);
+        for (auto& f : alts) mg.add(f);
+        mg.setShort(sh.frame, 8.f);
+        return mg.result();
+    };
+    MergeResult m = mergeAll();
     // PSNR en la zona de sombra con textura (fuera de la ventana y del objeto móvil)
     double g0 = psnr(ref.frame.planes[1], ref.clean[1], 275, 384);
     double g1 = psnr(m.planes[1], ref.clean[1], 275, 384);
@@ -117,6 +122,38 @@ static void testRaw(const char* outDir) {
     GainMapOut gm;
     FinishParams fp;
     finish(m, &md, fp, out.data(), W * 4, &gm);
+    // Calidad final: comparar con el revelado de la misma escena sin ruido, con y sin
+    // reducción de ruido espacial. Debe mejorar las sombras sin borrar la textura fina.
+    {
+        Frame cleanF = Frame::makeBayer(ref.clean[0], ref.clean[1], ref.clean[2], ref.clean[3]);
+        Merger cm(cleanF, nm);
+        cm.setShort(sh.frame, 8.f);
+        MergeResult cmr = cm.result();
+        std::vector<uint8_t> ideal(size_t(W) * H * 4), noDn(size_t(W) * H * 4);
+        FinishParams f0 = fp; f0.denoise = 0.f;
+        finish(cmr, &md, f0, ideal.data(), W * 4, nullptr);
+        MergeResult m2 = mergeAll();
+        finish(m2, &md, f0, noDn.data(), W * 4, nullptr);
+        auto reg = [&](const std::vector<uint8_t>& a, int x0, int x1, int y0, int y1) {
+            double e = 0; long cnt = 0;
+            for (int y = y0; y < y1; y++)
+                for (int x = x0; x < x1; x++)
+                    for (int c = 0; c < 3; c++) {
+                        double d = (double(a[(size_t(y) * W + x) * 4 + c]) - ideal[(size_t(y) * W + x) * 4 + c]) / 255.0;
+                        e += d * d; cnt++;
+                    }
+            return 10 * std::log10(1.0 / (e / cnt));
+        };
+        double sh0 = reg(noDn, 20, W - 20, 560, H - 20), sh1 = reg(out, 20, W - 20, 560, H - 20);
+        double tx0 = reg(noDn, 60, 480, 440, 500), tx1 = reg(out, 60, 480, 440, 500);
+        double up0 = reg(noDn, 20, 500, 20, 400), up1 = reg(out, 20, 500, 20, 400);
+        std::printf("  imagen final vs ideal — sombras: %.2f -> %.2f dB · textura fina: %.2f -> %.2f dB · pared/piel: %.2f -> %.2f dB\n",
+                    sh0, sh1, tx0, tx1, up0, up1);
+        CHECK(up1 > up0 + 1.0, "la reducción de ruido debería limpiar las zonas lisas");
+        CHECK(sh1 > sh0 - 0.2, "la reducción de ruido no debería empeorar las sombras con textura");
+        CHECK(tx1 > tx0 - 0.3, "la reducción de ruido no debería borrar la textura fina");
+    }
+
     // Ventana: con el frame corto debe conservar textura (no blanco plano).
     double s = 0, s2 = 0; int n = 0;
     for (int y = int(H * 0.12); y < int(H * 0.40); y++)
@@ -231,6 +268,26 @@ static void testYuv(const char* outDir) {
     writePpm(std::string(outDir) + "/yuv_out.ppm", out.data(), W, H);
 }
 
+static void testSharpness() {
+    std::printf("Nitidez (elección del frame de referencia)\n");
+    const int W = 400, H = 300;
+    std::vector<uint16_t> sharp(W * H), blurred(W * H);
+    std::mt19937 rng(5);
+    std::normal_distribution<float> N(0, 6);
+    Plane img(W, H);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) img.at(x, y) = 200 + 600 * vnoise(x / 3.f, y / 3.f);
+    Plane bl = img;
+    boxH(bl, 3);   // desenfoque de movimiento horizontal
+    for (int i = 0; i < W * H; i++) {
+        sharp[i] = uint16_t(std::max(0.f, img.d[i] + N(rng)));
+        blurred[i] = uint16_t(std::max(0.f, bl.d[i] + N(rng)));
+    }
+    double a = gradientEnergy(sharp.data(), W * 2, 0, 0, W, H, 2), b = gradientEnergy(blurred.data(), W * 2, 0, 0, W, H, 2);
+    std::printf("  nítido %.0f · movido %.0f\n", a, b);
+    CHECK(a > b * 1.5, "el frame nítido debería puntuar claramente más");
+}
+
 static void testLanczos() {
     std::printf("Lanczos\n");
     Plane p(400, 300, 0.5f);
@@ -238,11 +295,44 @@ static void testLanczos() {
     float mx = 0;
     for (float v : r.d) mx = std::max(mx, std::fabs(v - 0.5f));
     CHECK(mx < 1e-4f, "una imagen constante debe seguir constante (%g)", mx);
+
+    // Ampliación (zoom digital): un borde debe seguir siendo un borde, sin halos fuertes.
+    const int sw = 200, sh = 150, dw = 400, dh = 300;
+    std::vector<uint8_t> src(sw * sh * 4, 255), dst(dw * dh * 4, 0);
+    for (int y = 0; y < sh; y++)
+        for (int x = 0; x < sw; x++) {
+            uint8_t v = x < sw / 2 ? 60 : 180;
+            uint8_t* px = &src[(y * sw + x) * 4];
+            px[0] = px[1] = px[2] = v;
+        }
+    exportResize(src.data(), sw, sh, sw * 4, 0, 0, sw, sh, dst.data(), dw, dh, dw * 4, 0.2f);
+    int lo = 255, hi = 0;
+    for (int x = 0; x < dw; x++) { int v = dst[(150 * dw + x) * 4 + 1]; lo = std::min(lo, v); hi = std::max(hi, v); }
+    int left = dst[(150 * dw + 50) * 4 + 1], right = dst[(150 * dw + 350) * 4 + 1];
+    std::printf("  ampliación 2x: lados %d / %d, rango %d..%d\n", left, right, lo, hi);
+    CHECK(std::abs(left - 60) <= 1 && std::abs(right - 180) <= 1, "la ampliación debe conservar los niveles");
+    CHECK(lo >= 45 && hi <= 200, "la ampliación no debe crear halos fuertes (rango %d..%d)", lo, hi);
+
+    // Reducción (exportar a Instagram): mismo borde, de 1200 a 300 px de ancho.
+    const int bw = 1200, bh = 400, ow = 300, oh = 100;
+    std::vector<uint8_t> big(bw * bh * 4, 255), small(ow * oh * 4, 0);
+    for (int y = 0; y < bh; y++)
+        for (int x = 0; x < bw; x++) {
+            uint8_t v = x < bw / 2 + 2 ? 60 : 180;
+            uint8_t* px = &big[(y * bw + x) * 4];
+            px[0] = px[1] = px[2] = v;
+        }
+    exportResize(big.data(), bw, bh, bw * 4, 0, 0, bw, bh, small.data(), ow, oh, ow * 4, 0.35f);
+    lo = 255; hi = 0;
+    for (int x = 0; x < ow; x++) { int v = small[(50 * ow + x) * 4 + 1]; lo = std::min(lo, v); hi = std::max(hi, v); }
+    std::printf("  reducción 4x: rango %d..%d\n", lo, hi);
+    CHECK(lo >= 45 && hi <= 200, "la reducción no debe crear halos fuertes (rango %d..%d)", lo, hi);
 }
 
 int main(int argc, char** argv) {
     const char* outDir = argc > 1 ? argv[1] : ".";
     testLanczos();
+    testSharpness();
     testYuv(outDir);
     testRaw(outDir);
     if (failures) { std::printf("%d fallos\n", failures); return 1; }

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -33,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.carmelita.ccamera.ui.CameraScreen
+import com.carmelita.ccamera.ui.ShutterKeys
 
 class MainActivity : ComponentActivity() {
 
@@ -44,6 +46,16 @@ class MainActivity : ComponentActivity() {
     }.toTypedArray()
 
     private fun hasCamera() = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+    /** Los botones de volumen disparan la cámara (como en el iPhone). */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        val shutter = ShutterKeys.onShutter
+        if (shutter != null && (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            if (event?.repeatCount == 0) shutter()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

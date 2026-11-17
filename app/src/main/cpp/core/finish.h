@@ -16,6 +16,8 @@ struct RawMetadata {
     float ccm[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};       // cámara (tras WB) -> sRGB lineal
     int lscW = 0, lscH = 0;                            // mapa de sombreado de lente (4 canales)
     std::vector<float> lsc;                            // lscW*lscH*4: R, G1, G2, B
+    // Zona del mapa de sombreado que cubre la imagen (0..1). Cambia si el RAW se recortó (zoom).
+    float lscU0 = 0.f, lscV0 = 0.f, lscU1 = 1.f, lscV1 = 1.f;
 };
 
 struct FinishParams {
@@ -23,6 +25,7 @@ struct FinishParams {
     bool smartHdr = true;
     Style style = Style::Standard;
     float sharpen = 0.7f;
+    float denoise = 1.f;       // reducción de ruido espacial (0 = desactivada)
     float hdrHeadroom = 4.f;   // ratio máximo del mapa de ganancia (Ultra HDR)
     bool gainMap = true;
 };

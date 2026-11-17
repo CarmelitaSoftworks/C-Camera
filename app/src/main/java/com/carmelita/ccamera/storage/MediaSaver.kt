@@ -3,13 +3,19 @@ package com.carmelita.ccamera.storage
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.DngCreator
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import android.util.Size
+import com.carmelita.ccamera.camera.CapturedFrame
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -69,6 +75,49 @@ object MediaSaver {
             if (mp.size > jpeg.size) { jpeg = mp; name = "CCAM_${stamp(date)}.MP.jpg" }
         }
         return writeImage(context, jpeg, name, Environment.DIRECTORY_DCIM + "/CCamera", date)
+    }
+
+    /**
+     * Guarda el RAW original (el frame de referencia, sin procesar) como DNG junto a la foto.
+     * Devuelve null si el teléfono no lo permite.
+     */
+    fun saveDng(
+        context: Context, chars: CameraCharacteristics, result: CaptureResult, raw: CapturedFrame.Raw,
+        exifOrientation: Int, date: Date = Date(),
+    ): Uri? {
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "CCAM_${stamp(date)}.dng")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/x-adobe-dng")
+            put(MediaStore.Images.Media.DATE_TAKEN, date.time)
+            if (Build.VERSION.SDK_INT >= 29) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/CCamera")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+        }
+        val resolver = context.contentResolver
+        val uri = runCatching { resolver.insert(imagesCollection(), values) }.getOrNull() ?: return null
+        return try {
+            // DngCreator espera filas sin relleno (2 bytes por píxel).
+            val packed = if (raw.rowStride == raw.width * 2) raw.data.duplicate().apply { rewind() } else {
+                val out = ByteBuffer.allocateDirect(raw.width * 2 * raw.height)
+                val src = raw.data.duplicate()
+                val row = ByteArray(raw.width * 2)
+                for (y in 0 until raw.height) { src.position(y * raw.rowStride); src.get(row); out.put(row) }
+                out.rewind()
+                out
+            }
+            DngCreator(chars, result).use { dng ->
+                dng.setOrientation(exifOrientation)
+                resolver.openOutputStream(uri)!!.use { dng.writeByteBuffer(it, Size(raw.width, raw.height), packed, 0L) }
+            }
+            if (Build.VERSION.SDK_INT >= 29) {
+                resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
+            }
+            uri
+        } catch (e: Exception) {
+            runCatching { resolver.delete(uri, null, null) }
+            null
+        }
     }
 
     /** Exportación para redes (Pictures/CCamera/Instagram). */

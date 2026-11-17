@@ -54,11 +54,11 @@ object InstagramExporter {
     }
 
     /**
-     * Prepara la versión para Instagram: tamaño exacto (Instagram no vuelve a escalarla),
+     * Prepara la versión para Instagram ([anchor]: parte que se conserva al recortar, 0..1): tamaño exacto (Instagram no vuelve a escalarla),
      * reducción Lanczos en luz lineal, enfoque de salida y JPEG de calidad alta. Si la foto
      * es Ultra HDR se conserva el mapa de ganancia (Instagram en Android lo muestra en HDR).
      */
-    fun export(context: Context, photo: Uri, format: InstagramFormat): Uri {
+    fun export(context: Context, photo: Uri, format: InstagramFormat, anchor: Float = 0.5f): Uri {
         val src = decode(context, photo)
         val landscape = src.width > src.height
         val (dw, dh) = when {
@@ -75,7 +75,9 @@ object InstagramExporter {
             val target = dw.toFloat() / dh
             var cw = src.width; var ch = (src.width / target).roundToInt()
             if (ch > src.height) { ch = src.height; cw = (src.height * target).roundToInt() }
-            val cx = (src.width - cw) / 2; val cy = (src.height - ch) / 2
+            // El encuadre elegido decide qué parte se conserva en el eje que se recorta.
+            val k = anchor.coerceIn(0f, 1f)
+            val cx = ((src.width - cw) * k).roundToInt(); val cy = ((src.height - ch) * k).roundToInt()
             NativeEngine.exportResize(src, cx, cy, cw, ch, out, 0.35f)
             if (Build.VERSION.SDK_INT >= 34) copyGainmap(src, out, cx, cy, cw, ch)
         }

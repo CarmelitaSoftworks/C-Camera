@@ -25,11 +25,19 @@ object NativeEngine {
     /** Perfil de ruido del sensor (varianza = s * x + o, x normalizado 0..1). Antes del primer frame. */
     external fun setNoiseProfile(session: Long, s: Float, o: Float)
 
-    /** RAW16. cfa: 0 RGGB, 1 GRBG, 2 GBRG, 3 BGGR. black: 4 valores en orden del 2x2. */
+    /**
+     * RAW16. cfa: 0 RGGB, 1 GRBG, 2 GBRG, 3 BGGR. black: 4 valores en orden del 2x2.
+     * Sólo se usa el recorte (cropX, cropY, cropW, cropH), con valores pares. scale iguala la
+     * exposición del frame a la de la referencia.
+     */
     external fun addRaw(
         session: Long, buffer: ByteBuffer, rowStride: Int, width: Int, height: Int,
-        cfa: Int, black: FloatArray, white: Float, isShort: Boolean, ratio: Float,
+        cfa: Int, black: FloatArray, white: Float, cropX: Int, cropY: Int, cropW: Int, cropH: Int,
+        scale: Float, isShort: Boolean, ratio: Float,
     )
+
+    /** Nitidez de una zona de un frame. bytesPerSample: 2 = RAW16, 1 = plano de luma. */
+    external fun frameSharpness(buffer: ByteBuffer, rowStride: Int, x: Int, y: Int, w: Int, h: Int, bytesPerSample: Int): Double
 
     external fun addYuv(
         session: Long, y: ByteBuffer, yRowStride: Int, u: ByteBuffer, v: ByteBuffer,
@@ -47,7 +55,8 @@ object NativeEngine {
      */
     external fun process(
         session: Long, bitmap: Bitmap, meta: FloatArray?, lsc: FloatArray?, lscW: Int, lscH: Int,
-        exposure: Float, smartHdr: Boolean, style: Int, sharpen: Float, wantGainMap: Boolean, headroom: Float,
+        lscWindow: FloatArray?, exposure: Float, smartHdr: Boolean, style: Int, sharpen: Float, denoise: Float,
+        wantGainMap: Boolean, headroom: Float,
     ): ByteArray?
 
     external fun gainMapSize(session: Long): IntArray

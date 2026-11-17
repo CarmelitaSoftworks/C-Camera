@@ -94,6 +94,15 @@ data class CameraUiState(
     val showInfo: Boolean = false,
     val viewer: Uri? = null,
     val exporting: Boolean = false,
+    // Exposición, cuadrícula, temporizador y sugerencia de modo Noche
+    val ev: Float = 0f,
+    val evSupported: Boolean = false,
+    val grid: Boolean = false,
+    val timerSec: Int = 0,
+    val countdown: Int = 0,
+    val nightSuggested: Boolean = false,
+    val maxQueued: Int = 2,
+    val saveDng: Boolean = false,
 )
 
 class CameraViewModel(app: Application) : AndroidViewModel(app) {
@@ -101,6 +110,11 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("ccamera", 0)
     private val controller = CameraController(app)
     private val camMutex = Mutex()
+    private val processMutex = Mutex()
+    // Los frames copiados viven en el heap de la app: con poca memoria, menos frames y sin cola.
+    private val bigHeap = Runtime.getRuntime().maxMemory() >= (400L shl 20)
+    private val photoFrames = if (bigHeap) 6 else 4
+    private val maxQueued = if (bigHeap) 2 else 1
     private val qrScanner by lazy { QrScanner() }
 
     private val _state = MutableStateFlow(
@@ -112,6 +126,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             video4k = prefs.getBoolean("4k", true),
             video60 = prefs.getBoolean("60fps", false),
             flash = runCatching { FlashMode.valueOf(prefs.getString("flash", null) ?: "") }.getOrDefault(FlashMode.OFF),
+            grid = prefs.getBoolean("grid", false),
+            saveDng = prefs.getBoolean("dng", false),
+            maxQueued = if (Runtime.getRuntime().maxMemory() >= (400L shl 20)) 2 else 1,
+            timerSec = prefs.getInt("timer", 0).let { if (it == 3 || it == 10) it else 0 },
             hasFront = CameraCapabilities.hasLens(controller.manager, Lens.FRONT),
         )
     )
@@ -124,6 +142,12 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     private var recorder: VideoRecorder? = null
     private var recordingUri: Uri? = null
     private var recordingPfd: ParcelFileDescriptor? = null
+    private var countdownJob: Job? = null
+    // Compensación de exposición: valor continuo (EV) mientras se arrastra, y límites del sensor.
+    private var evTarget = 0f
+    private var evStep = 0f
+    private var evMin = 0f
+    private var evMax = 0f
 
     @Volatile var deviceRotation = 0
     /** La UI registra aquí cómo obtener un fotograma pequeño de la vista previa (para el QR). */
@@ -144,6 +168,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onPause() {
         started = false
+        countdownJob?.cancel()
+        _state.update { it.copy(countdown = 0) }
         if (_state.value.recording) toggleRecording()
         viewModelScope.launch { camMutex.withLock { controller.close() } }
     }
@@ -187,8 +213,14 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         }
         controller.setFlash(if (s.mode == CaptureMode.VIDEO) FlashMode.OFF else s.flash)
         controller.setZoom(1f)
+        evStep = caps.evStep
+        evMin = (caps.evRange.lower * caps.evStep).coerceAtLeast(-3f)
+        evMax = (caps.evRange.upper * caps.evStep).coerceAtMost(3f)
+        evTarget = 0f
+        controller.setExposureCompensation(0)
         _state.update {
             it.copy(
+                ev = 0f, evSupported = caps.supportsEv, nightSuggested = false,
                 zoom = 1f.coerceIn(caps.zoomRange.start, caps.zoomRange.endInclusive),
                 zoomRange = caps.zoomRange, zoomStops = caps.zoomStops,
                 hasFlash = caps.hasFlash, ultraHdr = caps.ultraHdr,
@@ -226,7 +258,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     fun setMode(m: CaptureMode) {
         val old = _state.value.mode
         if (old == m || _state.value.recording || _state.value.capturing) return
-        _state.update { it.copy(mode = m, qr = null) }
+        countdownJob?.cancel()
+        _state.update { it.copy(mode = m, qr = null, countdown = 0, nightSuggested = false) }
         if (old == CaptureMode.VIDEO || m == CaptureMode.VIDEO) reconfigure()
     }
 
@@ -265,14 +298,56 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun focusAt(nx: Float, ny: Float) {
-        _state.update { it.copy(focus = FocusMark(nx, ny, System.nanoTime())) }
-        viewModelScope.launch { camMutex.withLock { controller.focusAt(nx, ny) } }
+        evTarget = 0f
+        _state.update { it.copy(focus = FocusMark(nx, ny, System.nanoTime()), ev = 0f) }
+        viewModelScope.launch {
+            camMutex.withLock {
+                controller.setExposureCompensation(0)
+                controller.focusAt(nx, ny)
+            }
+        }
+        scheduleFocusReset()
+    }
+
+    /** El recuadro de enfoque se va a los 5 s sin tocar (la exposición elegida se mantiene). */
+    private fun scheduleFocusReset() {
         focusResetJob?.cancel()
         focusResetJob = viewModelScope.launch {
             delay(5_000)
             _state.update { it.copy(focus = null) }
             camMutex.withLock { controller.resetFocus() }
         }
+    }
+
+    /**
+     * Compensación de exposición al deslizar tras tocar para enfocar (como el sol del iPhone).
+     * [fraction]: desplazamiento vertical relativo a la altura del visor; hacia arriba aclara.
+     */
+    fun adjustEv(fraction: Float) {
+        if (evStep <= 0f || _state.value.focus == null) return
+        val before = Math.round(evTarget / evStep)
+        evTarget = (evTarget + fraction * 5f).coerceIn(evMin, evMax)
+        val index = Math.round(evTarget / evStep)
+        scheduleFocusReset()
+        if (index == before) return
+        _state.update { it.copy(ev = index * evStep) }
+        viewModelScope.launch { camMutex.withLock { controller.setExposureCompensation(index) } }
+    }
+
+    fun resetEv() {
+        evTarget = 0f
+        _state.update { it.copy(ev = 0f) }
+        viewModelScope.launch { camMutex.withLock { controller.setExposureCompensation(0) } }
+    }
+
+    fun toggleDng() { val v = !_state.value.saveDng; prefs.edit().putBoolean("dng", v).apply(); _state.update { it.copy(saveDng = v) } }
+
+    fun toggleGrid() { val v = !_state.value.grid; prefs.edit().putBoolean("grid", v).apply(); _state.update { it.copy(grid = v) } }
+
+    fun cycleTimer() {
+        val next = when (_state.value.timerSec) { 0 -> 3; 3 -> 10; else -> 0 }
+        prefs.edit().putInt("timer", next).apply()
+        _state.update { it.copy(timerSec = next) }
     }
 
     fun showInfo(v: Boolean) = _state.update { it.copy(showInfo = v) }
@@ -289,6 +364,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             while (isActive) {
                 delay(450)
                 val s = _state.value
+                // Sugerir el modo Noche cuando el AE ya va con exposición larga e ISO alto.
+                val dark = s.mode == CaptureMode.PHOTO && controller.isOpen && !s.capturing &&
+                    runCatching { controller.sceneIsDark() }.getOrDefault(false)
+                if (dark != s.nightSuggested) _state.update { it.copy(nightSuggested = dark) }
                 if (!s.qrEnabled || s.capturing || s.recording || s.viewer != null ||
                     (s.mode != CaptureMode.PHOTO && s.mode != CaptureMode.PORTRAIT) || !controller.isOpen
                 ) {
@@ -319,7 +398,40 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     fun shutter() {
         val s = _state.value
         if (s.mode == CaptureMode.VIDEO) { toggleRecording(); return }
-        if (s.capturing || processingCount.get() >= 2 || !controller.isOpen) return
+        // Pulsar durante la cuenta atrás la cancela.
+        if (countdownJob?.isActive == true) {
+            countdownJob?.cancel()
+            _state.update { it.copy(countdown = 0) }
+            return
+        }
+        if (s.capturing || processingCount.get() >= maxQueued || !controller.isOpen) return
+        if (s.timerSec > 0) {
+            countdownJob = viewModelScope.launch {
+                for (i in s.timerSec downTo 1) {
+                    _state.update { it.copy(countdown = i) }
+                    delay(1_000)
+                }
+                _state.update { it.copy(countdown = 0) }
+                capturePhoto()
+            }
+            return
+        }
+        capturePhoto()
+    }
+
+    /** Pone como referencia el más nítido de los 3 frames más recientes (si gana con claridad). */
+    private fun sharpestFirst(frames: List<CapturedFrame>): List<CapturedFrame> {
+        val n = minOf(3, frames.size)
+        val scores = runCatching { (0 until n).map { PhotoJob.sharpness(frames[it]) } }.getOrNull() ?: return frames
+        var best = 0
+        for (i in 1 until n) if (scores[i] > scores[best] * 1.1) best = i
+        if (best == 0) return frames
+        return listOf(frames[best]) + frames.filterIndexed { i, _ -> i != best }
+    }
+
+    private fun capturePhoto() {
+        val s = _state.value
+        if (s.capturing || processingCount.get() >= maxQueued || !controller.isOpen) return
         val rotation = controller.jpegOrientation(deviceRotation)
         _state.update { it.copy(capturing = true, captureProgress = 0f, shutterFlash = System.nanoTime(), qr = null) }
 
@@ -329,6 +441,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             var liveClip: Deferred<Pair<File, Long>?>? = null
             var refResult: TotalCaptureResult? = null
             var kind = ""
+            var counted = false
             try {
                 val caps = controller.caps
                 val info = controller.photoInfo ?: error("Sesión no lista")
@@ -336,50 +449,52 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 job = j
                 val flashNeeded = caps.hasFlash && (s.flash == FlashMode.ON || (s.flash == FlashMode.AUTO && controller.flashRequired()))
 
+                // Frames ya copiados que esperan a fusionarse: (frame, resultado, ¿es el frame corto?).
+                val pending = ArrayList<Triple<CapturedFrame, TotalCaptureResult?, Boolean>>()
                 camMutex.withLock {
                     when {
                         flashNeeded -> {
                             kind = "Flash"
-                            controller.captureWithFlash { f, r, _ -> j.add(f, r); refResult = r; progress(1f) }
+                            controller.captureWithFlash { f, r, _ -> pending += Triple(f, r, false); progress(1f) }
                         }
                         s.mode == CaptureMode.NIGHT -> {
                             kind = "Noche"
-                            controller.frames.setPaused(true)
-                            try {
-                                val (reqs, t) = controller.nightRequests(NIGHT_FRAMES)
-                                controller.capture(reqs, 3_000 + (t ?: 0L) / 1_000_000L * 3) { f, r, i ->
-                                    if (i == 0) refResult = r
-                                    j.add(f, r); progress((i + 1f) / NIGHT_FRAMES)
-                                }
-                            } finally { controller.frames.setPaused(false) }
+                            // Son muchos frames largos: se fusionan según llegan para no acumularlos en memoria.
+                            processMutex.withLock {
+                                controller.frames.setPaused(true)
+                                try {
+                                    val (reqs, t) = controller.nightRequests(NIGHT_FRAMES)
+                                    controller.capture(reqs, 3_000 + (t ?: 0L) / 1_000_000L * 3) { f, r, i ->
+                                        val isRef = j.framesAdded == 0
+                                        if (j.add(f, r) && isRef) { refResult = r; saveDngAsync(s, caps, f, r, rotation) }
+                                        progress((i + 1f) / NIGHT_FRAMES)
+                                    }
+                                } finally { controller.frames.setPaused(false) }
+                            }
                         }
                         else -> {
                             kind = if (s.mode == CaptureMode.PORTRAIT) "Retrato" else "Foto"
-                            val zsl = if (info.zsl) controller.frames.takeLatest(PHOTO_FRAMES) else emptyList()
-                            if (zsl.size >= 2) {
+                            val latest = if (info.zsl) controller.frames.takeLatest(photoFrames) else emptyList()
+                            if (latest.size >= 2) {
                                 kind += " ZSL"
-                                val shutterUs = zsl.first().timestamp / 1000
+                                val shutterUs = latest.first().timestamp / 1000
                                 val lr = controller.liveRecorder
                                 if (lr != null && s.mode == CaptureMode.PHOTO && s.livePhoto) {
                                     val file = File(getApplication<Application>().cacheDir, "live_${System.currentTimeMillis()}.mp4")
                                     liveClip = async(Dispatchers.IO) { runCatching { lr.export(shutterUs, file, rotation) }.getOrNull() }
                                 }
-                                zsl.forEachIndexed { i, f ->
-                                    val r = controller.frames.result(f.timestamp)
-                                    if (i == 0) refResult = r
-                                    j.add(f, r); progress((i + 1f) / (zsl.size + 1))
-                                }
+                                for (f in sharpestFirst(latest)) pending += Triple(f, controller.frames.result(f.timestamp), false)
                             } else {
-                                controller.capture(controller.burstRequests(PHOTO_FRAMES), 3_000) { f, r, i ->
-                                    if (i == 0) refResult = r
-                                    j.add(f, r); progress((i + 1f) / (PHOTO_FRAMES + 1))
+                                controller.capture(controller.burstRequests(photoFrames), 3_000) { f, r, i ->
+                                    pending += Triple(f, r, false)
+                                    progress((i + 1f) / (photoFrames + 1))
                                 }
                             }
                             // Smart HDR: un frame subexpuesto para las altas luces.
                             if (s.smartHdr) {
                                 controller.shortExposureRequest(SHORT_RATIO)?.let { req ->
                                     runCatching {
-                                        controller.capture(listOf(req), 2_000) { f, _, _ -> j.add(f, null, isShort = true, ratio = SHORT_RATIO) }
+                                        controller.capture(listOf(req), 2_000) { f, r, _ -> pending += Triple(f, r, true) }
                                     }.onFailure { Log.w(TAG, "Frame corto", it) }
                                 }
                             }
@@ -387,20 +502,33 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                 }
+                // La cámara ya está libre: se puede disparar otra vez mientras esta foto se procesa.
                 val count = processingCount.incrementAndGet()
+                counted = true
                 _state.update { it.copy(capturing = false, processing = count) }
 
                 val params = DevelopParams(
                     style = s.style, smartHdr = s.smartHdr,
                     sharpen = when { kind == "Noche" -> 0.5f; kind == "Flash" -> 0.6f; else -> 0.7f },
                     exposure = if (kind == "Noche") 1.15f else 1f,
-                    ultraHdr = caps.ultraHdr,
+                    // En retrato no se guarda mapa HDR: quedaría nítido sobre un fondo ya desenfocado.
+                    ultraHdr = caps.ultraHdr && s.mode != CaptureMode.PORTRAIT,
                 )
-                val bmp = j.develop(params)
-                j.close(); job = null
-                if (s.mode == CaptureMode.PORTRAIT) {
-                    val ok = runCatching { Portrait.apply(bmp, rotation) }.getOrElse { Log.w(TAG, "Retrato", it); false }
-                    if (!ok) toast("No se detectó a ninguna persona: foto sin desenfoque")
+                // El procesado va de uno en uno (usa mucha memoria); las fotos siguientes esperan su turno.
+                val bmp = processMutex.withLock {
+                    for ((f, r, isShort) in pending) {
+                        val isRef = !isShort && j.framesAdded == 0
+                        if (j.add(f, r, isShort = isShort, ratio = SHORT_RATIO) && isRef) { refResult = r; saveDngAsync(s, caps, f, r, rotation) }
+                    }
+                    pending.clear()
+                    val full = j.develop(params)
+                    val developed = if (j.zoomCropped) PhotoJob.upscaleIfSmall(full) else full
+                    j.close(); job = null
+                    if (s.mode == CaptureMode.PORTRAIT) {
+                        val ok = runCatching { Portrait.apply(developed, rotation) }.getOrElse { Log.w(TAG, "Retrato", it); false }
+                        if (!ok) toast("No se detectó a ninguna persona: foto sin desenfoque")
+                    }
+                    developed
                 }
                 val clip = liveClip?.await()
                 val r = refResult
@@ -426,7 +554,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Throwable) {
                 Log.e(TAG, "Fallo en la captura", e)
                 job?.close()
-                val busy = if (_state.value.capturing) processingCount.get() else processingCount.decrementAndGet().coerceAtLeast(0)
+                val busy = if (counted) processingCount.decrementAndGet().coerceAtLeast(0) else processingCount.get()
                 _state.update {
                     it.copy(
                         capturing = false, processing = busy,
@@ -434,6 +562,16 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             }
+        }
+    }
+
+    /** Si está activado, guarda en segundo plano el RAW de referencia como DNG. */
+    private fun saveDngAsync(s: CameraUiState, caps: CameraCapabilities, frame: CapturedFrame, result: TotalCaptureResult?, rotation: Int) {
+        if (!s.saveDng || frame !is CapturedFrame.Raw || result == null) return
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val uri = MediaSaver.saveDng(app, caps.characteristicsFor(result), result, frame, ExifWriter.degreesToOrientation(rotation))
+            if (uri == null) Log.w(TAG, "No se pudo guardar el DNG")
         }
     }
 
@@ -495,13 +633,14 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------------- Instagram ----------------
 
-    fun exportInstagram(format: InstagramFormat) {
+    /** [anchor]: qué parte se conserva al recortar (0 = arriba/izquierda, 0.5 = centro, 1 = abajo/derecha). */
+    fun exportInstagram(format: InstagramFormat, anchor: Float = 0.5f) {
         val uri = _state.value.viewer ?: _state.value.lastUri ?: return
         if (_state.value.exporting) return
         _state.update { it.copy(exporting = true) }
         viewModelScope.launch(Dispatchers.Default) {
             try {
-                val out = InstagramExporter.export(getApplication<Application>(), uri, format)
+                val out = InstagramExporter.export(getApplication<Application>(), uri, format, anchor)
                 InstagramExporter.share(getApplication<Application>(), out)
             } catch (e: Throwable) {
                 Log.e(TAG, "Exportar", e)
@@ -526,7 +665,6 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val TAG = "CCamera"
-        private const val PHOTO_FRAMES = 6
         private const val NIGHT_FRAMES = 8
         private const val SHORT_RATIO = 6f
     }

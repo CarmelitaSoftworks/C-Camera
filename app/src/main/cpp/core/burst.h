@@ -49,6 +49,7 @@ struct MergeResult {
     std::vector<int> scale;
     NoiseModel noise;                 // del canal individual (antes de fusionar)
     float effectiveFrames = 1.f;
+    Plane frameCount;                 // frames efectivos por píxel (resolución del plano 0)
     /** Sigma residual aproximada a nivel 0.18 (para enfoque/denoise). */
     float residualSigma() const { return noise.sigma(0.18f) / std::sqrt(std::max(1.f, effectiveFrames)); }
 };

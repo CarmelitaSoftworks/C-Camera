@@ -91,6 +91,29 @@ void softBlur(Plane& p, int r);
 /** Filtro guiado (He et al.): suaviza pIn respetando los bordes de I. */
 Plane guidedFilter(const Plane& I, const Plane& pIn, int r, float eps);
 
+/**
+ * Nitidez de un frame sin convertirlo: energía de gradiente entre píxeles del mismo color
+ * (colorStep = 2 en un mosaico Bayer, 1 en luma), muestreando 1 de cada 4. Sirve para comparar
+ * frames de la misma escena: el ruido suma lo mismo a todos, el desenfoque de movimiento resta.
+ */
+template <class T>
+double gradientEnergy(const T* data, int strideBytes, int x0, int y0, int w, int h, int colorStep) {
+    double acc = 0;
+    long n = 0;
+    const int skip = 4 * colorStep;
+    for (int y = y0 + colorStep; y < y0 + h - colorStep; y += skip) {
+        const T* row = reinterpret_cast<const T*>(reinterpret_cast<const uint8_t*>(data) + size_t(y) * strideBytes);
+        const T* below = reinterpret_cast<const T*>(reinterpret_cast<const uint8_t*>(data) + size_t(y + colorStep) * strideBytes);
+        for (int x = x0 + colorStep; x < x0 + w - colorStep; x += skip) {
+            double c = double(row[x]);
+            double dx = double(row[x + colorStep]) - c, dy = double(below[x]) - c;
+            acc += dx * dx + dy * dy;
+            n++;
+        }
+    }
+    return n > 0 ? acc / double(n) : 0.0;
+}
+
 // ---- Color ----
 float srgbToLin(float x);
 float linToSrgb(float x);

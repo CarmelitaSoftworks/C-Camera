@@ -3,7 +3,7 @@ package com.carmelita.ccamera.processing
 import android.graphics.Bitmap
 import android.graphics.Gainmap
 import android.graphics.Matrix
-import android.hardware.camera2.CameraCharacteristics
+import android.graphics.Rect
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.os.Build
@@ -18,11 +18,13 @@ import kotlinx.coroutines.tasks.await
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.max
+import kotlin.math.min
 
 data class DevelopParams(
     val style: PhotoStyle = PhotoStyle.STANDARD,
     val smartHdr: Boolean = true,
     val sharpen: Float = 0.7f,
+    val denoise: Float = 1f,
     val exposure: Float = 1f,
     val ultraHdr: Boolean = true,
     val headroom: Float = 4f,
@@ -35,27 +37,86 @@ data class DevelopParams(
 class PhotoJob(private val caps: CameraCapabilities, private val raw: Boolean) : AutoCloseable {
     private val handle = NativeEngine.createSession()
     private var refResult: TotalCaptureResult? = null
+    private var refExposure: Double? = null
+    private var sensor: CameraCapabilities.RawSensor? = null
+    private var crop: Rect? = null
     private var closed = false
     var framesAdded = 0
         private set
 
-    fun add(frame: CapturedFrame, result: TotalCaptureResult?, isShort: Boolean = false, ratio: Float = 1f) {
+    /** ¿La foto salió de un recorte del sensor por zoom digital? */
+    val zoomCropped: Boolean
+        get() {
+            val c = crop ?: return false
+            val a = sensor?.active ?: return false
+            return c.width() < a.width() * 0.9f
+        }
+
+    /**
+     * Añade un frame. Devuelve false si se descarta: otra lente (cambio de cámara física a mitad
+     * de ráfaga) o una exposición demasiado distinta de la referencia.
+     */
+    fun add(frame: CapturedFrame, result: TotalCaptureResult?, isShort: Boolean = false, ratio: Float = 1f): Boolean {
         check(!closed)
-        if (!isShort && framesAdded == 0) {
+        val first = !isShort && framesAdded == 0
+        val exposure = exposureOf(result)
+        if (first) {
             refResult = result
+            refExposure = exposure
             noiseProfile(result)?.let { (s, o) -> NativeEngine.setNoiseProfile(handle, s, o) }
         }
+        val refExp = refExposure
+        // Los frames del búfer ZSL pueden tener exposiciones distintas (el AE se mueve): se igualan.
+        var scale = 1f
+        var shortRatio = ratio
+        if (!first && exposure != null && refExp != null) {
+            val rel = (refExp / exposure).toFloat()
+            if (isShort) {
+                if (rel in 1.5f..32f) shortRatio = rel
+            } else {
+                if (rel !in 0.67f..1.5f) return false
+                if (frame is CapturedFrame.Yuv && (rel < 0.94f || rel > 1.06f)) return false
+                scale = rel
+            }
+        }
         when (frame) {
-            is CapturedFrame.Raw -> NativeEngine.addRaw(
-                handle, frame.data, frame.rowStride, frame.width, frame.height,
-                caps.cfa, blackLevels(result), whiteLevel(result), isShort, ratio,
-            )
+            is CapturedFrame.Raw -> {
+                val activeId = activePhysicalId(result)
+                val sn = sensor ?: caps.rawSensor(activeId).also { sensor = it }
+                if (!first && result != null && activeId != sn.id) return false
+                val c = crop ?: zoomCrop(sn, frame.width, frame.height, zoomOf(result)).also { crop = it }
+                val black = dynamicBlack(result) ?: sn.black
+                val white = dynamicWhite(result) ?: sn.whiteLevel
+                NativeEngine.addRaw(
+                    handle, frame.data, frame.rowStride, frame.width, frame.height,
+                    sn.cfa, black, white, c.left, c.top, c.width(), c.height(), scale, isShort, shortRatio,
+                )
+            }
             is CapturedFrame.Yuv -> NativeEngine.addYuv(
                 handle, frame.y, frame.yRowStride, frame.u, frame.v, frame.uvRowStride, frame.uvPixelStride,
-                frame.width, frame.height, isShort, ratio,
+                frame.width, frame.height, isShort, shortRatio,
             )
         }
         if (!isShort) framesAdded++
+        return true
+    }
+
+    /** Luz total del frame (tiempo x sensibilidad), para comparar exposiciones. */
+    private fun exposureOf(r: TotalCaptureResult?): Double? {
+        val t = r?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return null
+        val iso = r.get(CaptureResult.SENSOR_SENSITIVITY) ?: return null
+        return if (t > 0 && iso > 0) t.toDouble() * iso else null
+    }
+
+    private fun activePhysicalId(r: TotalCaptureResult?): String? =
+        if (Build.VERSION.SDK_INT >= 29 && caps.logicalMultiCamera) r?.get(CaptureResult.LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID) else null
+
+    /** Zoom pedido en este frame (el RAW no viene recortado: hay que recortarlo aquí). */
+    private fun zoomOf(r: TotalCaptureResult?): Float {
+        if (r == null) return 1f
+        if (Build.VERSION.SDK_INT >= 30 && caps.usesZoomRatio) r.get(CaptureResult.CONTROL_ZOOM_RATIO)?.let { return it }
+        val region = r.get(CaptureResult.SCALER_CROP_REGION) ?: return 1f
+        return if (region.width() > 0) caps.activeArray.width().toFloat() / region.width() else 1f
     }
 
     private fun noiseProfile(r: TotalCaptureResult?): Pair<Float, Float>? {
@@ -67,20 +128,16 @@ class PhotoJob(private val caps: CameraCapabilities, private val raw: Boolean) :
         return if (s > 0 && o >= 0) s to o else null
     }
 
-    private fun blackLevels(r: TotalCaptureResult?): FloatArray {
-        if (Build.VERSION.SDK_INT >= 28) {
-            r?.get(CaptureResult.SENSOR_DYNAMIC_BLACK_LEVEL)?.let { if (it.size >= 4) return it.copyOf(4) }
-        }
-        val p = caps.chars.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)
-        return if (p != null) floatArrayOf(
-            p.getOffsetForIndex(0, 0).toFloat(), p.getOffsetForIndex(1, 0).toFloat(),
-            p.getOffsetForIndex(0, 1).toFloat(), p.getOffsetForIndex(1, 1).toFloat(),
-        ) else FloatArray(4) { 64f }
+    private fun dynamicBlack(r: TotalCaptureResult?): FloatArray? {
+        if (Build.VERSION.SDK_INT < 28) return null
+        val b = r?.get(CaptureResult.SENSOR_DYNAMIC_BLACK_LEVEL) ?: return null
+        return if (b.size >= 4) b.copyOf(4) else null
     }
 
-    private fun whiteLevel(r: TotalCaptureResult?): Float {
-        if (Build.VERSION.SDK_INT >= 28) r?.get(CaptureResult.SENSOR_DYNAMIC_WHITE_LEVEL)?.let { if (it > 0) return it.toFloat() }
-        return caps.whiteLevel.toFloat()
+    private fun dynamicWhite(r: TotalCaptureResult?): Float? {
+        if (Build.VERSION.SDK_INT < 28) return null
+        val w = r?.get(CaptureResult.SENSOR_DYNAMIC_WHITE_LEVEL) ?: return null
+        return if (w > 0) w.toFloat() else null
     }
 
     /** [wb x4, ccm x9] del resultado de la referencia. */
@@ -109,6 +166,18 @@ class PhotoJob(private val caps: CameraCapabilities, private val raw: Boolean) :
         return Triple(a, w, h)
     }
 
+    /** Parte del mapa de sombreado de lente que cubre el recorte, como [u0, v0, u1, v1]. */
+    private fun lscWindow(): FloatArray? {
+        val sn = sensor ?: return null
+        val c = crop ?: return null
+        val a = sn.active
+        if (a.width() <= 0 || a.height() <= 0) return null
+        return floatArrayOf(
+            (c.left - a.left).toFloat() / a.width(), (c.top - a.top).toFloat() / a.height(),
+            (c.right - a.left).toFloat() / a.width(), (c.bottom - a.top).toFloat() / a.height(),
+        )
+    }
+
     /** Revela la foto. El Bitmap está en orientación del sensor (la rotación va en EXIF). */
     fun develop(p: DevelopParams): Bitmap {
         val (w, h) = NativeEngine.outputSize(handle).let { it[0] to it[1] }
@@ -117,7 +186,7 @@ class PhotoJob(private val caps: CameraCapabilities, private val raw: Boolean) :
         val wantGain = p.ultraHdr && Build.VERSION.SDK_INT >= 34
         val gain = NativeEngine.process(
             handle, bmp, if (raw) colorMeta() else null, lsc?.first, lsc?.second ?: 0, lsc?.third ?: 0,
-            p.exposure, p.smartHdr, p.style.ordinal, p.sharpen, wantGain, p.headroom,
+            lscWindow(), p.exposure, p.smartHdr, p.style.ordinal, p.sharpen, p.denoise, wantGain, p.headroom,
         )
         if (gain != null && Build.VERSION.SDK_INT >= 34) {
             val (gw, gh) = NativeEngine.gainMapSize(handle).let { it[0] to it[1] }
@@ -132,6 +201,48 @@ class PhotoJob(private val caps: CameraCapabilities, private val raw: Boolean) :
 
     companion object {
         private const val TAG = "PhotoJob"
+
+        /**
+         * Recorte del RAW para un zoom dado: zona útil del sensor, reducida al centro según el
+         * zoom que falta por aplicar (zoom pedido / zoom propio de la lente), con bordes pares.
+         */
+        fun zoomCrop(sensor: CameraCapabilities.RawSensor, width: Int, height: Int, zoom: Float): Rect {
+            val a = sensor.active
+            val residual = (zoom / sensor.lensRatio).coerceIn(1f, 16f)
+            var w = (a.width() / residual).toInt() and 1.inv()
+            var h = (a.height() / residual).toInt() and 1.inv()
+            w = w.coerceIn(64, width and 1.inv()); h = h.coerceIn(64, height and 1.inv())
+            // El origen par mantiene la fase del mosaico de color.
+            val x = (a.left + (a.width() - w) / 2).coerceIn(0, width - w) and 1.inv()
+            val y = (a.top + (a.height() - h) / 2).coerceIn(0, height - h) and 1.inv()
+            return Rect(x, y, x + w, y + h)
+        }
+
+        /**
+         * Tras un zoom digital la foto sale pequeña (el RAW se recorta). Se amplía con Lanczos en
+         * luz lineal hasta un tamaño razonable, como hacen las cámaras de serie.
+         */
+        fun upscaleIfSmall(bmp: Bitmap, targetLongSide: Int = 3264): Bitmap {
+            val longSide = max(bmp.width, bmp.height)
+            if (longSide >= targetLongSide * 0.85f) return bmp
+            val k = min(2.5f, targetLongSide.toFloat() / longSide)
+            val out = Bitmap.createBitmap((bmp.width * k).toInt() and 1.inv(), (bmp.height * k).toInt() and 1.inv(), Bitmap.Config.ARGB_8888)
+            NativeEngine.exportResize(bmp, 0, 0, bmp.width, bmp.height, out, 0.2f)
+            // El mapa de ganancia cubre la imagen entera a cualquier tamaño: se reutiliza tal cual.
+            if (Build.VERSION.SDK_INT >= 34) bmp.gainmap?.let { out.gainmap = it }
+            return out
+        }
+
+        /** Nitidez de un frame (mayor = más nítido), medida en la zona central. */
+        fun sharpness(frame: CapturedFrame): Double = when (frame) {
+            is CapturedFrame.Raw -> NativeEngine.frameSharpness(
+                frame.data, frame.rowStride, (frame.width / 4) and 1.inv(), (frame.height / 4) and 1.inv(),
+                frame.width / 2, frame.height / 2, 2,
+            )
+            is CapturedFrame.Yuv -> NativeEngine.frameSharpness(
+                frame.y, frame.yRowStride, frame.width / 4, frame.height / 4, frame.width / 2, frame.height / 2, 1,
+            )
+        }
 
         @RequiresApi(34)
         fun attachGainmap(bmp: Bitmap, data: ByteArray, gw: Int, gh: Int, headroom: Float) {

@@ -10,11 +10,11 @@ mensajes al usuario **en español**.
   sólo corre a mano, con la etiqueta `compilar` en un PR o con un tag `v*`.
 - **No martillear la API de GitHub** (nada de bucles de sondeo cada pocos segundos). El 9-nov-2026
   la cuenta de GitHub quedó suspendida justo después de una sesión automatizada que hizo push,
-  abrió el PR #1, creó una etiqueta, lanzó Actions y consultó la API cada 15 s. Hasta que se
-  resuelva la apelación, compilar en local.
+  abrió el PR #1, creó una etiqueta, lanzó Actions y consultó la API cada 15 s. El 16-nov la cuenta volvió a
+  responder: como mucho un push y unas pocas consultas espaciadas por compilación.
 - Commits con mensajes en español.
 
-## Estado (9-nov-2026)
+## Estado (17-nov-2026)
 
 - Rama `c-camera-v0.2` (PR #1 en GitHub). El último commit local puede no estar subido.
 - **La app Android nunca se ha compilado de verdad.** Se comprobó el tipado de todo el Kotlin
@@ -72,6 +72,15 @@ app/src/main/java/com/carmelita/ccamera/
 ```
 
 ## Decisiones y detalles a no romper
+
+- El RAW no llega recortado por el zoom: `PhotoJob.zoomCrop` recorta al ingerir (zona activa del
+  sensor / zoom que falta según la lente física activa) y pasa la ventana al mapa de sombreado.
+- Los frames ZSL se igualan en exposición (`scale`) y se descartan si difieren más de ±50 % o
+  vienen de otra lente. La referencia es el más nítido de los 3 más recientes.
+- Captura y procesado van separados: `camMutex` sólo durante la copia de frames; `processMutex`
+  serializa la fusión (memoria). Orden de bloqueo: camMutex -> processMutex, nunca al revés.
+- En retrato no se guarda mapa de ganancia (quedaría nítido sobre el fondo desenfocado).
+- Vista previa de foto con fps mínimo alto (`photoFpsRange`) para que el AE no pase de ~1/30 s.
 
 - Planos Bayer canónicos en C++: R, G1 (G en fila de R), G2, B; `cfaMap` en el JNI traduce el CFA.
 - RAW normalizado 0..1 con nivel de negro por posición del 2x2 (`SENSOR_DYNAMIC_BLACK_LEVEL`).

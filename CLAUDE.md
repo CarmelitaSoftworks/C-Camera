@@ -13,7 +13,9 @@ mensajes al usuario **en español**.
   la cuenta de GitHub quedó suspendida justo después de una sesión automatizada que hizo push,
   abrió el PR #1, creó una etiqueta, lanzó Actions y consultó la API cada 15 s. Se recuperó
   la cuenta y el proyecto vuelve a trabajarse sólo en GitHub (la copia de GitLab queda sin uso).
-- Commits con mensajes en español.
+- Commits con mensajes en español, **a nombre del usuario**: autor y committer "Carmelita Softworks" con el
+  correo de los commits anteriores (`git log`). Sin líneas `Co-Authored-By`/`Claude-Session` ni
+  mención a Claude en commits, PR o archivos (lo pidió el usuario el 10-nov-2026).
 
 ## Estado (9-nov-2026)
 

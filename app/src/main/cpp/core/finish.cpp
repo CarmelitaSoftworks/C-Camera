@@ -607,26 +607,8 @@ inline void yuvToRgbGamma(float y, float u, float v, float* o) {
 void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, GainMapOut* gm) {
     Plane& Y = m.planes[0];
     float sigma = m.residualSigma();
-    if (sigma > 1.5f / 255.f) Y = bilateral5(Y, 2.5f * sigma);
-    // Ruido de color: con ISO alto (cámara frontal a ISO 3200) salían manchas de colores en la
-    // piel. Filtro guiado por la luma a la resolución del croma: quita las manchas sin cruzar bordes.
-    Plane U, V;
-    {
-        float cs = sigma * 255.f;
-        if (cs > 1.2f) {
-            Plane yd = resizeBilinear(Y, m.planes[1].w, m.planes[1].h);
-            int r = std::max(2, m.planes[1].w / (cs > 4.f ? 100 : 220));
-            float eps = std::max(1e-4f, 6.f * sigma * sigma);
-            U = guidedFilter(yd, m.planes[1], r, eps);
-            V = guidedFilter(yd, m.planes[2], r, eps);
-        } else {
-            U = blur(m.planes[1], 1);
-            V = blur(m.planes[2], 1);
-        }
-    }
-    // El YUV ya viene procesado por el ISP: menos realce de textura que en RAW (amplificaba el ruido).
-    sharpenPlane(Y, sigma, p.sharpen);
-    texturePlane(Y, std::max(2, Y.w / 1000), 0.2f * p.sharpen, sigma * 1.5f);
+    // Copias del croma: se filtran más abajo, cuando ya se sabe cuánta ganancia lleva la foto.
+    Plane U = m.planes[1], V = m.planes[2];
     bool hasShort = !m.shortPlanes.empty();
     int w = Y.w, h = Y.h;
 
@@ -644,7 +626,7 @@ void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, 
         for (int c = 0; c < 3; c++) o[c] *= p.exposure;
     };
 
-    // Baja resolución.
+    // Baja resolución (el promedio de bloques ya quita el ruido: sirve antes de filtrar).
     int f = std::max(1, int(std::ceil(std::max(w, h) / 1024.f)));
     int lw = w / f, lh = h / f;
     LowRes lr{Plane(lw, lh), Plane(lw, lh), Plane(lw, lh)};
@@ -663,6 +645,68 @@ void finishYuv(MergeResult& m, const FinishParams& p, uint8_t* out, int stride, 
             }
     });
     GainField field = makeField(lr, p);
+
+    // El ruido se mide antes de aclarar, pero el brillo automático, la exposición y el Smart HDR
+    // (sombras x1,8) lo multiplican después. Sin tenerlo en cuenta, el selfie de noche salía con
+    // grano grueso y manchas de colores ("quemado"). En gamma la ganancia lineal k sube el ruido ~k^0,45.
+    float total = field.autoGain * std::max(p.exposure, 1.f) * (p.smartHdr ? 1.5f : 1.f);
+    float amp = std::min(std::max(std::pow(total, 0.45f), 1.f), 2.5f);
+    float se = sigma * amp;   // ruido efectivo en la salida
+
+    // Grano grueso: la reducción de ruido del ISP quita el ruido fino pero deja manchas de 2-4 px que
+    // el modelo de ruido (fino) no ve. Se mide y se limpia a media resolución y sólo se devuelve
+    // la corrección (el detalle fino queda intacto).
+    {
+        Plane y2 = resizeBilinear(Y, std::max(1, w / 2), std::max(1, h / 2));
+        float s2 = estimateNoise(y2).sigma(0.18f) * amp;
+        if (s2 > 2.f / 255.f) {
+            Plane d = bilateral5(y2, 2.5f * s2);
+            if (s2 > 4.f / 255.f) {
+                Plane sm = guidedFilter(d, d, std::max(2, d.w / 300), (1.6f * s2) * (1.6f * s2));
+                float mix = std::min(1.f, (s2 * 255.f - 4.f) / 6.f) * 0.8f;
+                for (size_t i = 0; i < d.d.size(); i++) d.d[i] += (sm.d[i] - d.d[i]) * mix;
+            }
+            for (size_t i = 0; i < d.d.size(); i++) d.d[i] -= y2.d[i];
+            Plane corr = resizeBilinear(d, w, h);
+            for (size_t i = 0; i < Y.d.size(); i++) Y.d[i] += corr.d[i];
+            se = std::max(se, 0.5f * s2);   // lo que quede se trata también como ruido al enfocar
+        }
+    }
+    if (se > 1.5f / 255.f) Y = bilateral5(Y, 2.5f * se);
+    if (se > 4.f / 255.f) {
+        // Grano grueso (el que deja la reducción de ruido del ISP): suavizado guiado por la propia
+        // luma, que conserva los bordes (gafas, pelo) y aplana la piel y las paredes.
+        Plane sm = guidedFilter(Y, Y, std::max(2, Y.w / 600), (1.6f * se) * (1.6f * se));
+        float mix = std::min(1.f, (se * 255.f - 4.f) / 6.f) * 0.8f;
+        for (size_t i = 0; i < Y.d.size(); i++) Y.d[i] += (sm.d[i] - Y.d[i]) * mix;
+    }
+    // Ruido de color: filtro guiado por la luma a la resolución del croma (quita las manchas sin
+    // cruzar bordes). En las sombras, con mucha ganancia, el croma además se atenúa (lo que hace
+    // cualquier ISP): ahí casi todo el color es ruido.
+    {
+        float cs = se * 255.f;
+        Plane yd = resizeBilinear(Y, U.w, U.h);
+        if (cs > 1.2f) {
+            int r = std::max(2, U.w / (cs > 4.f ? 80 : 220));
+            float eps = std::max(1e-4f, 8.f * se * se);
+            U = guidedFilter(yd, U, r, eps);
+            V = guidedFilter(yd, V, r, eps);
+        } else {
+            U = blur(U, 1);
+            V = blur(V, 1);
+        }
+        if (cs > 3.f) {
+            float lo = std::min(0.25f, 6.f * se);
+            for (size_t i = 0; i < U.d.size(); i++) {
+                float k = 0.4f + 0.6f * smoothstep(0.f, lo, yd.d[i]);
+                U.d[i] *= k; V.d[i] *= k;
+            }
+        }
+    }
+    // El YUV ya viene procesado por el ISP: menos realce de textura que en RAW, y nada de textura
+    // cuando la foto se aclara mucho (sólo realzaría el grano).
+    sharpenPlane(Y, se, p.sharpen / amp);
+    if (amp < 1.3f) texturePlane(Y, std::max(2, Y.w / 1000), 0.2f * p.sharpen, se * 1.5f);
     const Plane& gain = field.gain;
     Renderer rd(p.style, p.saturation);
     {

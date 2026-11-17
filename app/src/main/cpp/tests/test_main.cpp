@@ -288,6 +288,71 @@ static void testYuv(const char* outDir) {
     writePpm(std::string(outDir) + "/yuv_out.ppm", out.data(), W, H);
 }
 
+/** Selfie de noche: un único YUV oscuro y ruidoso que el brillo automático aclara mucho. */
+static void testYuvDark(const char* outDir) {
+    std::printf("YUV oscuro (selfie de noche)\n");
+    const int W = 640, H = 480;
+    bool coarse = false;   // grano grueso (correlado), como el que deja la reducción de ruido del ISP
+    auto make = [&](float sigma, unsigned seed) {
+        std::mt19937 rng(seed);
+        std::normal_distribution<float> N(0, 1);
+        Plane ny(W, H);
+        for (auto& v : ny.d) v = N(rng);
+        if (coarse) {
+            ny = blur(ny, 2);
+            double s2 = 0;
+            for (float v : ny.d) s2 += v * v;
+            float k = float(1.0 / std::sqrt(s2 / ny.d.size()));
+            for (auto& v : ny.d) v *= k;
+        }
+        Plane y(W, H), u(W / 2, H / 2), v(W / 2, H / 2);
+        for (int j = 0; j < H; j++)
+            for (int i = 0; i < W; i++) {
+                float rgb[3];
+                scene((i + 20) * 1.6f, (j + 20) * 1.6f, rgb);
+                float r = linToSrgb(rgb[0] * 0.12f), g = linToSrgb(rgb[1] * 0.12f), b = linToSrgb(rgb[2] * 0.12f);
+                float Y = 0.299f * r + 0.587f * g + 0.114f * b;
+                y.at(i, j) = std::round(clamp01(Y + ny.at(i, j) * sigma) * 255.f) / 255.f;
+                if ((i & 1) == 0 && (j & 1) == 0) {
+                    u.at(i / 2, j / 2) = -0.168736f * r - 0.331264f * g + 0.5f * b + N(rng) * sigma;
+                    v.at(i / 2, j / 2) = 0.5f * r - 0.418688f * g - 0.081312f * b + N(rng) * sigma;
+                }
+            }
+        return Frame::makeYuv(y, u, v);
+    };
+    auto develop = [&](float sigma, std::vector<uint8_t>& out) {
+        Frame f = make(sigma, 7);
+        NoiseModel nm = sigma > 0 ? estimateNoise(f.guide) : estimateNoise(make(0.02f, 9).guide);
+        Merger mg(f, nm);
+        MergeResult m = mg.result();
+        out.assign(size_t(W) * H * 4, 0);
+        FinishParams fp;
+        finish(m, nullptr, fp, out.data(), W * 4, nullptr);
+    };
+    for (int pass = 0; pass < 2; pass++) {
+    coarse = pass == 1;
+    std::vector<uint8_t> clean, noisy;
+    develop(0.f, clean);
+    develop(coarse ? 0.03f : 0.02f, noisy);
+    double se = 0, sc = 0;
+    size_t n = 0;
+    for (size_t i = 0; i < clean.size(); i += 4) {
+        float yc = 0.299f * clean[i] + 0.587f * clean[i + 1] + 0.114f * clean[i + 2];
+        float yn = 0.299f * noisy[i] + 0.587f * noisy[i + 1] + 0.114f * noisy[i + 2];
+        se += (yn - yc) * (yn - yc);
+        float cc = std::fabs(float(noisy[i]) - noisy[i + 1]) - std::fabs(float(clean[i]) - clean[i + 1]);
+        sc += cc * cc;
+        n++;
+    }
+    double rmsY = std::sqrt(se / n), rmsC = std::sqrt(sc / n);
+    std::printf("  ruido de salida (%s): luma %.2f, color %.2f (niveles de 8 bits)\n",
+                coarse ? "grano grueso" : "grano fino", rmsY, rmsC);
+    writePpm(std::string(outDir) + (coarse ? "/yuv_oscuro_grueso.ppm" : "/yuv_oscuro.ppm"), noisy.data(), W, H);
+    CHECK(rmsY < 9.0, "selfie de noche con demasiado grano (%.2f)", rmsY);
+    CHECK(rmsC < 9.0, "selfie de noche con demasiado ruido de color (%.2f)", rmsC);
+    }
+}
+
 static void testLanczos() {
     std::printf("Lanczos\n");
     Plane p(400, 300, 0.5f);
@@ -344,6 +409,7 @@ int main(int argc, char** argv) {
     testPortraitDepth();
     testWhiteBalanceFix();
     testYuv(outDir);
+    testYuvDark(outDir);
     testRaw(outDir);
     if (failures) { std::printf("%d fallos\n", failures); return 1; }
     std::printf("Todo OK\n");
